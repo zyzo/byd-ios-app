@@ -135,10 +135,10 @@ struct BluetoothSheet: View {
                     HStack {
                         Text("Unlock distance")
                         Spacer()
-                        Text("≈ \(autoUnlock.distance) m").fontWeight(.semibold).foregroundStyle(Theme.accent)
+                        Text("≈ \(AutoUnlock.label(autoUnlock.distance))").fontWeight(.semibold).foregroundStyle(Theme.accent)
                     }
                     Picker("Unlock distance", selection: $autoUnlock.distance) {
-                        ForEach(AutoUnlock.distances, id: \.self) { Text("\($0) m").tag($0) }
+                        ForEach(AutoUnlock.distances, id: \.self) { Text(AutoUnlock.label($0)).tag($0) }
                     }
                     .pickerStyle(.segmented)
                     Text("Approximate. Walls, pockets and bags weaken the signal, so start short and widen it if it unlocks too late.")
@@ -176,7 +176,7 @@ struct BluetoothSheet: View {
     private var autoUnlockSubtitle: String {
         guard autoUnlock.isOn else { return "Off" }
         guard autoUnlock.carLocation != nil else { return "On · connect to the car once so it knows where it's parked" }
-        return "On · within about \(autoUnlock.distance) m"
+        return "On · within about \(AutoUnlock.label(autoUnlock.distance))"
     }
 }
 

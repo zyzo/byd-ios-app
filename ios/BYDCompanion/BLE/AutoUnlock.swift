@@ -14,11 +14,17 @@ import UserNotifications
 @MainActor
 @Observable
 final class AutoUnlock: NSObject {
-    static let distances = [1, 2, 3, 5]
+    /// Unlock distances, in centimetres.
+    static let distances = [50, 100, 200, 300, 500]
 
-    /// Smoothed RSSI (dBm) that roughly matches each distance in metres. Approximate:
+    /// Smoothed RSSI (dBm) that roughly matches each distance. Approximate:
     /// walls, pockets and bags weaken the signal.
-    private static let thresholds: [Int: Double] = [1: -62, 2: -67, 3: -71, 5: -76]
+    private static let thresholds: [Int: Double] = [50: -55, 100: -62, 200: -67, 300: -71, 500: -76]
+
+    /// "50 cm", "1 m", …
+    static func label(_ centimetres: Int) -> String {
+        centimetres < 100 ? "\(centimetres) cm" : "\(centimetres / 100) m"
+    }
     private static let regionID = "parked-car"
     private static let regionRadius: CLLocationDistance = 150
     private static let holdTime: TimeInterval = 1.5
@@ -63,8 +69,9 @@ final class AutoUnlock: NSObject {
     init(link: BleCarLink) {
         self.link = link
         wanted = defaults.bool(forKey: Keys.wanted)
-        let saved = defaults.integer(forKey: Keys.distance)
-        distance = Self.distances.contains(saved) ? saved : 1
+        var saved = defaults.integer(forKey: Keys.distance)
+        if [1, 2, 3, 5].contains(saved) { saved *= 100 }  // older versions saved metres
+        distance = Self.distances.contains(saved) ? saved : 100
         authorization = manager.authorizationStatus
         if let at = defaults.object(forKey: Keys.armedAt) as? Double {
             armedAt = Date(timeIntervalSince1970: at)
@@ -109,7 +116,7 @@ final class AutoUnlock: NSObject {
         default:
             break
         }
-        link.note("Auto-unlock switched on (≈\(distance) m)")
+        link.note("Auto-unlock switched on (≈\(Self.label(distance)))")
         updateRegion()
         if isOn, link.state == .ready { manager.requestLocation() }
     }

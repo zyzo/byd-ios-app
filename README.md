@@ -7,12 +7,12 @@ An unofficial iPhone app for BYD cars: see battery, range, locks, windows and ty
 ## Screenshots
 
 <p align="center">
-  <img src="docs/screenshots/home.png" width="260" alt="Home screen: battery 78%, 812 km total range, car locked, Bluetooth ready">
-  <img src="docs/screenshots/controls.png" width="260" alt="Home screen with the car unlocked and the A/C on">
-  <img src="docs/screenshots/bluetooth.png" width="260" alt="Bluetooth key sheet with auto-unlock on and a 1 m unlock distance">
+  <img src="docs/screenshots/home.png" width="250" alt="Home screen: battery 78%, 812 km total range, car locked, Bluetooth ready">
+  &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+  <img src="docs/screenshots/controls.png" width="250" alt="Home screen with the car unlocked and the A/C on">
+  &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+  <img src="docs/screenshots/bluetooth.png" width="250" alt="Bluetooth key sheet with auto-unlock on and unlock distances from 50 cm to 5 m">
 </p>
-
-<p align="center"><sub>Sample data from demo mode. To try it yourself, add the launch argument <code>-demo YES</code> in Xcode › Product › Scheme › Edit Scheme › Run › Arguments.</sub></p>
 
 ## How it works
 
@@ -93,7 +93,7 @@ In the Bluetooth sheet, turn on **Unlock as I walk up** and allow location **Alw
 
 - Each time the phone connects to or disconnects from the car, it remembers that spot and watches a ~150 m zone around it. iOS wakes the app there even if it's closed.
 - Leaving the zone while not connected arms auto-unlock. Driving away, connected the whole time, doesn't.
-- When you come back, the app reconnects and sends one Bluetooth unlock once the signal stays above the chosen distance (1–5 m) for 1.5 seconds. It never unlocks through the cloud, and a quiet notification tells you it happened.
+- When you come back, the app reconnects and sends one Bluetooth unlock once the signal stays above the chosen distance (50 cm to 5 m) for 1.5 seconds. It never unlocks through the cloud, and a quiet notification tells you it happened.
 
 The distances are rough guesses from signal strength: walls, pockets and bags change them. The Bluetooth sheet shows the live signal to help you pick one.
 
