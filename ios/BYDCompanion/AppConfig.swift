@@ -6,6 +6,8 @@ enum AppConfig {
     static let serverToken = info("ServerToken") ?? ""
     static let displayName = info("CFBundleDisplayName") ?? "BYD Companion"
     static let bundleID = Bundle.main.bundleIdentifier ?? "byd-companion"
+    /// Sample data instead of a real car (launch argument `-demo YES`). See Demo.swift.
+    static let demo = UserDefaults.standard.bool(forKey: "demo")
 
     private static func info(_ key: String) -> String? {
         guard let value = Bundle.main.object(forInfoDictionaryKey: key) as? String,

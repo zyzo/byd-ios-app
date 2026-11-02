@@ -85,6 +85,15 @@ final class BleCarLink: NSObject {
 
     override init() {
         super.init()
+        if AppConfig.demo {
+            // A connected car, without touching Bluetooth.
+            central = CBCentralManager(delegate: nil, queue: .main)
+            hasKey = true
+            state = .ready
+            readySince = Date()
+            log = DemoCar.log
+            return
+        }
         key = BleKeyStore.load()
         hasKey = key != nil
         // The restore identifier lets iOS relaunch the app in the background for the car.
@@ -111,6 +120,7 @@ final class BleCarLink: NSObject {
     }
 
     func connect() {
+        guard !AppConfig.demo else { return }
         guard key != nil else { state = .noKey; return }
         wantsConnection = true
         guard central.state == .poweredOn else {
@@ -129,6 +139,7 @@ final class BleCarLink: NSObject {
     }
 
     func disconnect() {
+        guard !AppConfig.demo else { return }
         wantsConnection = false
         central.stopScan()
         if let peripheral { central.cancelPeripheralConnection(peripheral) }
@@ -138,11 +149,21 @@ final class BleCarLink: NSObject {
     /// Asks the car for the current signal strength; the answer arrives via `rssi` and `onRSSI`.
     func readRSSI() {
         guard state == .ready else { return }
+        if AppConfig.demo {
+            rssi = Int.random(in: -60 ... -56)
+            return
+        }
         peripheral?.readRSSI()
     }
 
     /// Sends one control command and waits up to 3 s for the car's acknowledgement.
     func send(_ control: BleCodec.Control) async throws {
+        if AppConfig.demo {
+            note("→ control 0x\(String(format: "%02X", control.rawValue))")
+            try? await Task.sleep(for: .milliseconds(300))
+            note("← control result 1")
+            return
+        }
         guard state == .ready, var current = session else { throw CommandError.notReady }
         let frame = current.controlFrame(control)
         session = current

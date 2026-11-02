@@ -148,8 +148,13 @@ struct BluetoothSheet: View {
                     }
                 }
                 .padding(.vertical, 4)
-                LabeledContent("Location access") {
-                    Label("Always", systemImage: "checkmark").foregroundStyle(Theme.text)
+                HStack(spacing: 6) {
+                    Text("Location access")
+                    Spacer()
+                    Image(systemName: "checkmark")
+                        .font(.footnote.weight(.bold))
+                        .foregroundStyle(Theme.accent)
+                    Text("Always").foregroundStyle(.secondary)
                 }
             } else if autoUnlock.needsAlways {
                 VStack(alignment: .leading, spacing: 10) {

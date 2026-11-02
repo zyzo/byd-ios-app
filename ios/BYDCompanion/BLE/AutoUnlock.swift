@@ -73,6 +73,12 @@ final class AutoUnlock: NSObject {
             carLocation = CLLocationCoordinate2D(latitude: lat, longitude: lon)
         }
         super.init()
+        if AppConfig.demo {
+            wanted = true
+            authorization = .authorizedAlways
+            carLocation = CLLocationCoordinate2D(latitude: 10.7769, longitude: 106.7009)
+            return
+        }
         manager.delegate = self
 
         link.onReady = { [weak self] in self?.linkReady() }
@@ -88,6 +94,7 @@ final class AutoUnlock: NSObject {
     // MARK: Switching on and off
 
     func enable() {
+        if AppConfig.demo { wanted = true; return }
         wanted = true
         defaults.set(true, forKey: Keys.wanted)
         // Quiet (provisional) notifications need no prompt; they report each auto-unlock.

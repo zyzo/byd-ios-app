@@ -101,6 +101,7 @@ final class CarViewModel {
         if let control = command.bleControl, ble.state == .ready {
             do {
                 try await ble.send(control)
+                if AppConfig.demo { DemoCar.apply(command) }
                 return true
             } catch BleCarLink.CommandError.unconfirmed {
                 throw BleCarLink.CommandError.unconfirmed

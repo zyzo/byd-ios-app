@@ -11,6 +11,7 @@ struct CarAPI {
     }
 
     func status(refresh: Bool = false) async throws -> CarStatus {
+        if AppConfig.demo { return await DemoCar.status }
         var components = URLComponents(url: try endpoint("status"), resolvingAgainstBaseURL: false)!
         if refresh {
             components.queryItems = [URLQueryItem(name: "refresh", value: "true")]
@@ -20,11 +21,17 @@ struct CarAPI {
 
     /// Downloads the Bluetooth key the Mac provisioned (provision_ble_key.py).
     func bleKey() async throws -> BleKey {
-        try await send(URLRequest(url: try endpoint("ble-key")))
+        if AppConfig.demo { throw ServerError(message: "Not available in demo mode.") }
+        return try await send(URLRequest(url: try endpoint("ble-key")))
     }
 
     /// Sends a command to the car. Returns whether BYD confirmed it.
     func run(_ command: CarCommand, temperature: Double = 21, minutes: Int = 20) async throws -> Bool {
+        if AppConfig.demo {
+            try await Task.sleep(for: .milliseconds(600))
+            await DemoCar.apply(command)
+            return true
+        }
         var request = URLRequest(url: try endpoint("command/\(command.rawValue)"))
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")

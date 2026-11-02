@@ -4,6 +4,16 @@ An unofficial iPhone app for BYD cars: see battery, range, locks, windows and ty
 
 > **Unofficial and unsupported.** Not affiliated with or endorsed by BYD. It uses private, undocumented BYD interfaces that can change or stop working at any time, and it controls your car's locks. Use it at your own risk, keep your physical key with you, and test while parked.
 
+## Screenshots
+
+<p align="center">
+  <img src="docs/screenshots/home.png" width="260" alt="Home screen: battery 78%, 812 km total range, car locked, Bluetooth ready">
+  <img src="docs/screenshots/controls.png" width="260" alt="Home screen with the car unlocked and the A/C on">
+  <img src="docs/screenshots/bluetooth.png" width="260" alt="Bluetooth key sheet with auto-unlock on and a 1 m unlock distance">
+</p>
+
+<p align="center"><sub>Sample data from demo mode. To try it yourself, add the launch argument <code>-demo YES</code> in Xcode › Product › Scheme › Edit Scheme › Run › Arguments.</sub></p>
+
 ## How it works
 
 ```
