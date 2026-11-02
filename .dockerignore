@@ -1,0 +1,12 @@
+.env
+.venv/
+ios/
+cloudflare/
+__pycache__/
+*.py[cod]
+info.py
+.git/
+ble_key.json
+.watch_token.json
+.watch_device_id
+watch_qr.png

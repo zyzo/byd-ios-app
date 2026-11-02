@@ -1,0 +1,10 @@
+# Server (server.py)
+pybyd==0.0.79
+fastapi==0.162.0
+uvicorn[standard]==0.54.0
+python-dotenv==1.2.4
+
+# Bluetooth key provisioning (provision_ble_key.py)
+httpx==0.28.1
+pycryptodome==4.2.0
+qrcode[pil]==8.2

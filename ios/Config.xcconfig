@@ -1,0 +1,18 @@
+// App settings. Don't edit this file for your own car: copy
+// Config.local.example.xcconfig to Config.local.xcconfig (gitignored) and override there.
+
+// Name under the icon on the home screen.
+APP_DISPLAY_NAME = BYD Companion
+// Must be unique to you, e.g. com.yourname.byd-companion.
+APP_BUNDLE_ID = com.example.byd-companion
+// Name of an app icon set in an asset catalog (see README, "Custom icon").
+APP_ICON_NAME = AppIcon
+// Your Apple developer team ID (Xcode › Settings › Accounts).
+DEVELOPMENT_TEAM =
+
+// The backend (server.py). Write "//" as "/$()/": xcconfig treats "//" as a comment.
+SERVER_URL =
+// Must match APP_TOKEN in the server's .env.
+SERVER_TOKEN =
+
+#include? "Config.local.xcconfig"

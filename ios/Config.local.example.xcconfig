@@ -1,0 +1,10 @@
+// Copy to Config.local.xcconfig and fill in. That file is gitignored.
+
+APP_DISPLAY_NAME = My Sealion
+APP_BUNDLE_ID = com.yourname.byd-companion
+// APP_ICON_NAME = MyIcon
+DEVELOPMENT_TEAM = ABCDE12345
+
+// "//" must be written as "/$()/".
+SERVER_URL = https:/$()/your-server.example.com
+SERVER_TOKEN = paste-the-APP_TOKEN-from-your-.env
