@@ -14,6 +14,14 @@ An unofficial iPhone app for BYD cars: see battery, range, locks, windows and ty
   <img src="docs/screenshots/bluetooth.png" width="250" alt="Bluetooth key sheet with auto-unlock on and unlock distances from 50 cm to 5 m">
 </p>
 
+## What's better than the official BYD app
+
+- **No Face ID check every time.** Open the app and tap; it doesn't ask you to verify yourself before each command.
+- **Trunk lock and unlock** from the phone.
+- **Auto-unlock over Bluetooth.** Walk up to the car and it unlocks, even with the app closed. See [Auto-unlock](#4-auto-unlock-optional).
+- **Works without internet near the car.** Lock, unlock, trunk and honk go straight over Bluetooth, so they still work in an underground car park with no signal.
+- **Faster near the car.** A Bluetooth command takes about a second, instead of several through BYD's cloud.
+
 ## How it works
 
 ```
