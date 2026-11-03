@@ -4,6 +4,8 @@ Wraps pyBYD so the app never handles BYD credentials or BYD's encryption.
 Every request needs `Authorization: Bearer <APP_TOKEN>` (APP_TOKEN lives in .env).
 
 Run:  .venv/bin/uvicorn server:app --host 127.0.0.1 --port 8765
+Or deploy to Vercel: `vercel --prod` (see vercel.json). The BYD login happens
+lazily on the first request, so it also works as a serverless function.
 """
 
 import asyncio
@@ -27,7 +29,7 @@ STATUS_TTL_SECONDS = 30
 
 
 class State:
-    client: BydClient
+    client: BydClient | None = None
     vin: str
     vehicle: object
     lock = asyncio.Lock()
@@ -39,14 +41,28 @@ class State:
 state = State()
 
 
-@asynccontextmanager
-async def lifespan(_: FastAPI):
-    async with BydClient(BydConfig.from_env()) as client:
-        state.client = client
-        vehicles = await client.get_vehicles()
+async def ensure_client() -> BydClient:
+    """Logs in to BYD on first use. Serverless hosts don't run ASGI lifespan events."""
+    if state.client is None:
+        client = BydClient(BydConfig.from_env())
+        await client.__aenter__()
+        try:
+            vehicles = await client.get_vehicles()
+        except BaseException:
+            await client.__aexit__(None, None, None)
+            raise
         state.vehicle = vehicles[0]
         state.vin = vehicles[0].vin
-        yield
+        state.client = client
+    return state.client
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    yield
+    if state.client is not None:
+        await state.client.__aexit__(None, None, None)
+        state.client = None
 
 
 app = FastAPI(title="BYD Companion backend", lifespan=lifespan)
@@ -69,7 +85,8 @@ def to_bar(value: float | None, unit: TirePressureUnit | None) -> float | None:
 
 
 async def fetch_status() -> dict:
-    client, vin = state.client, state.vin
+    client = await ensure_client()
+    vin = state.vin
     rt = await client.get_vehicle_realtime(vin)
     try:
         ac_on = (await client.get_hvac_status(vin)).is_ac_on
@@ -153,10 +170,11 @@ async def command(name: str, body: ClimateRequest | None = None) -> dict:
         raise HTTPException(status_code=404, detail=f"Unknown command {name}")
     async with state.lock:
         try:
+            client = await ensure_client()
             if not state.command_access:
-                await state.client.verify_command_access(state.vin)
+                await client.verify_command_access(state.vin)
                 state.command_access = True
-            result = await COMMANDS[name](state.client, state.vin, body or ClimateRequest())
+            result = await COMMANDS[name](client, state.vin, body or ClimateRequest())
         except (BydApiError, ValueError) as e:
             raise HTTPException(status_code=502, detail=str(e)) from e
         state.status_at = 0.0  # next /status call fetches fresh data

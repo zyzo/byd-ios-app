@@ -57,6 +57,16 @@ cloudflared tunnel --url http://127.0.0.1:8765
 
 It prints an `https://….trycloudflare.com` address. That address changes each time you start the tunnel; for a fixed one, use a named tunnel. `cloudflare/` also has a Cloudflare Containers setup (needs the Workers Paid plan): set the region in `cloudflare/wrangler.jsonc`, add the secrets with `npx wrangler secret put` (`APP_TOKEN`, `BYD_USERNAME`, `BYD_PASSWORD`, `BYD_CONTROL_PIN`), then run `npm install && npm run deploy` in that folder.
 
+Or deploy it to [Vercel](https://vercel.com) as a serverless function (free Hobby plan works):
+
+```bash
+vercel --prod
+for v in BYD_USERNAME BYD_PASSWORD BYD_CONTROL_PIN APP_TOKEN BYD_BASE_URL BYD_COUNTRY_CODE BYD_LANGUAGE BYD_TIME_ZONE; do grep "^$v=" .env | cut -d= -f2- | tr -d '\n' | vercel env add "$v" production --force; done
+vercel --prod
+```
+
+The second deploy picks up the variables. On Vercel the server logs in to BYD on each cold start, and the Bluetooth key endpoint is unavailable (`ble_key.json` stays on your Mac), so import the key from the local server.
+
 ## 2. Build the app
 
 ```bash

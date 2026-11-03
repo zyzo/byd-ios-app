@@ -12,3 +12,4 @@ watch_qr.png
 ios/Config.local.xcconfig
 ios/BYDCompanion/Local.xcassets/
 .DS_Store
+.vercel
