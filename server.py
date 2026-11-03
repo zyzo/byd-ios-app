@@ -26,6 +26,23 @@ from pybyd.models.realtime import DoorOpenState, TirePressureUnit, WindowState
 load_dotenv()
 APP_TOKEN = os.environ["APP_TOKEN"]
 STATUS_TTL_SECONDS = 30
+SKIP_COMMAND_GATE = os.environ.get("BYD_SKIP_COMMAND_GATE", "").lower() in ("1", "true", "yes")
+
+if SKIP_COMMAND_GATE:
+    # pyBYD refuses commands that BYD's feature list for the car doesn't advertise, for example
+    # trunk and windows on some cars where BYD's data is incomplete. With BYD_SKIP_COMMAND_GATE
+    # set, the command is sent anyway and the app reports what BYD answers.
+    import pybyd.client as _pybyd_client
+
+    _evaluate_command_gate = _pybyd_client.evaluate_command_gate
+
+    def _permissive_gate(*args, **kwargs):
+        verdict = _evaluate_command_gate(*args, **kwargs)
+        if verdict.supported:
+            return verdict
+        return verdict.model_copy(update={"supported": True, "reason": f"bypassed ({verdict.reason})"})
+
+    _pybyd_client.evaluate_command_gate = _permissive_gate
 
 
 class State:

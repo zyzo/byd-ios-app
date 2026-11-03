@@ -58,6 +58,8 @@ vercel --prod
 
 The first deploy creates the project, the loop copies your `.env` into its environment variables, and the second deploy picks them up. It prints a fixed `https://….vercel.app` address: that's your `SERVER_URL`. On Vercel the server logs in to BYD on each cold start.
 
+If **Trunk** or **Windows** fail with "Remote command … blocked … reason=function_no_missing" or "learn_info_missing", pyBYD is refusing to send them because BYD's feature list for your car doesn't advertise them. That data is often incomplete. Set `BYD_SKIP_COMMAND_GATE=1` (in `.env`, or as a Vercel environment variable) to send them anyway; the app then shows what BYD answers.
+
 To run it on your Mac instead: `.venv/bin/uvicorn server:app --host 127.0.0.1 --port 8765`, and expose it to the iPhone however you like.
 
 `cloudflare/` has an alternative Cloudflare Containers setup (needs the Workers Paid plan): set the region in `cloudflare/wrangler.jsonc`, add the secrets with `npx wrangler secret put`, then run `npm install && npm run deploy` in that folder.
