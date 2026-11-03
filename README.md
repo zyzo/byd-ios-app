@@ -25,7 +25,7 @@ An unofficial iPhone app for BYD cars: see battery, range, locks, windows and ty
 ## How it works
 
 ```
-iPhone app ──HTTPS──▶ server.py (your Mac or a container) ──▶ BYD cloud ──▶ car
+iPhone app ──HTTPS──▶ server.py (on Vercel) ──▶ BYD cloud ──▶ car
      └──────────── Bluetooth, when nearby (lock, unlock, trunk, honk) ────────▶ car
 ```
 
@@ -46,18 +46,9 @@ python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
 cp .env.example .env    # then fill it in, including your region
 .venv/bin/python info.py   # optional: checks your login and prints what BYD returns
-.venv/bin/uvicorn server:app --host 127.0.0.1 --port 8765
 ```
 
-The iPhone needs to reach the server. The quickest way is a [Cloudflare quick tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/do-more-with-tunnels/trycloudflare/):
-
-```bash
-cloudflared tunnel --url http://127.0.0.1:8765
-```
-
-It prints an `https://….trycloudflare.com` address. That address changes each time you start the tunnel; for a fixed one, use a named tunnel. `cloudflare/` also has a Cloudflare Containers setup (needs the Workers Paid plan): set the region in `cloudflare/wrangler.jsonc`, add the secrets with `npx wrangler secret put` (`APP_TOKEN`, `BYD_USERNAME`, `BYD_PASSWORD`, `BYD_CONTROL_PIN`), then run `npm install && npm run deploy` in that folder.
-
-Or deploy it to [Vercel](https://vercel.com) as a serverless function (free Hobby plan works):
+The iPhone needs to reach the server, so deploy it to [Vercel](https://vercel.com) as a serverless function (the free Hobby plan works). Install the [Vercel CLI](https://vercel.com/docs/cli), then:
 
 ```bash
 vercel --prod
@@ -65,7 +56,11 @@ for v in BYD_USERNAME BYD_PASSWORD BYD_CONTROL_PIN APP_TOKEN BYD_BASE_URL BYD_CO
 vercel --prod
 ```
 
-The second deploy picks up the variables. On Vercel the server logs in to BYD on each cold start, and the Bluetooth key endpoint is unavailable (`ble_key.json` stays on your Mac), so import the key from the local server.
+The first deploy creates the project, the loop copies your `.env` into its environment variables, and the second deploy picks them up. It prints a fixed `https://….vercel.app` address: that's your `SERVER_URL`. On Vercel the server logs in to BYD on each cold start.
+
+To run it on your Mac instead: `.venv/bin/uvicorn server:app --host 127.0.0.1 --port 8765`, and expose it to the iPhone however you like.
+
+`cloudflare/` has an alternative Cloudflare Containers setup (needs the Workers Paid plan): set the region in `cloudflare/wrangler.jsonc`, add the secrets with `npx wrangler secret put`, then run `npm install && npm run deploy` in that folder.
 
 ## 2. Build the app
 
@@ -80,7 +75,7 @@ Fill in `ios/Config.local.xcconfig` (it's gitignored):
 | `APP_DISPLAY_NAME` | The name under the icon |
 | `APP_BUNDLE_ID` | Any identifier unique to you, e.g. `com.yourname.byd-companion` |
 | `DEVELOPMENT_TEAM` | Your team ID, from Xcode › Settings › Accounts |
-| `SERVER_URL` | The server address. Write `//` as `/$()/`, e.g. `https:/$()/abc.trycloudflare.com` |
+| `SERVER_URL` | The server address. Write `//` as `/$()/`, e.g. `https:/$()/byd-app-abc.vercel.app` |
 | `SERVER_TOKEN` | The `APP_TOKEN` from your `.env` |
 
 Then open `ios/BYDCompanion.xcodeproj`, pick your iPhone and press Run.
@@ -101,7 +96,8 @@ With a Bluetooth key, lock, unlock, opening the trunk and honking go straight to
 1. Run `.venv/bin/python provision_ble_key.py`. It opens a QR code.
 2. In the official BYD app, scan it and tap Submit.
 3. The key is saved to `ble_key.json`. That file is a car key: it's gitignored, never share it.
-4. Restart `server.py`. In the app, tap the Bluetooth chip under the headline, then **Import key from Mac server**. The key is stored in the iPhone's Keychain.
+4. Give the server the key. On Vercel: `vercel env add BLE_KEY_JSON production < ble_key.json`, then `vercel --prod`. On your Mac, just restart `server.py`.
+5. In the app, tap the Bluetooth chip under the headline, then **Import key from Mac server**. The key is stored in the iPhone's Keychain. You can remove `BLE_KEY_JSON` from Vercel afterwards.
 
 Commands that aren't confirmed by the car within 3 seconds are reported, not retried through the cloud, because the car may already have acted.
 

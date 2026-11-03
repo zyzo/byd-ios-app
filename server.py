@@ -136,10 +136,16 @@ BLE_KEY_FILE = Path(__file__).parent / "ble_key.json"
 
 @app.get("/ble-key", dependencies=[Depends(require_token)])
 async def ble_key() -> dict:
-    """Hands the Bluetooth key (made by provision_ble_key.py) to the app once, for its Keychain."""
-    if not BLE_KEY_FILE.exists():
+    """Hands the Bluetooth key (made by provision_ble_key.py) to the app once, for its Keychain.
+
+    Reads ble_key.json next to this file, or the BLE_KEY_JSON environment variable when hosted.
+    """
+    if BLE_KEY_FILE.exists():
+        record = json.loads(BLE_KEY_FILE.read_text())
+    elif os.environ.get("BLE_KEY_JSON"):
+        record = json.loads(os.environ["BLE_KEY_JSON"])
+    else:
         raise HTTPException(status_code=404, detail="No Bluetooth key yet. Run provision_ble_key.py on the Mac.")
-    record = json.loads(BLE_KEY_FILE.read_text())
     return {k: record.get(k) for k in ("vin", "macAddress", "dkey", "keyNumber", "keyValidTo")}
 
 
