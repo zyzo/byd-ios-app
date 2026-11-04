@@ -19,7 +19,7 @@ final class AutoUnlock: NSObject {
 
     /// Smoothed RSSI (dBm) that roughly matches each distance. Approximate:
     /// walls, pockets and bags weaken the signal.
-    private static let thresholds: [Int: Double] = [50: -55, 100: -62, 200: -67, 300: -71, 500: -76]
+    static let thresholds: [Int: Double] = [50: -55, 100: -62, 200: -67, 300: -71, 500: -76]
 
     /// "50 cm", "1 m", …
     static func label(_ centimetres: Int) -> String {
@@ -88,9 +88,9 @@ final class AutoUnlock: NSObject {
         }
         manager.delegate = self
 
-        link.onReady = { [weak self] in self?.linkReady() }
-        link.onLinkLost = { [weak self] in self?.linkLost() }
-        link.onRSSI = { [weak self] in self?.evaluate($0) }
+        link.onReady.append { [weak self] in self?.linkReady() }
+        link.onLinkLost.append { [weak self] in self?.linkLost() }
+        link.onRSSI.append { [weak self] in self?.evaluate($0) }
 
         NotificationCenter.default.addObserver(forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.appBecameActive() }
@@ -98,14 +98,11 @@ final class AutoUnlock: NSObject {
         updateRegion()
     }
 
-    // MARK: Switching on and off
-
     func enable() {
         if AppConfig.demo { wanted = true; return }
         wanted = true
         defaults.set(true, forKey: Keys.wanted)
-        // Quiet (provisional) notifications need no prompt; they report each auto-unlock.
-        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .provisional]) { _, _ in }
+        CarNotifications.requestQuietPermission()
         switch authorization {
         case .notDetermined:
             requesting = true
@@ -146,8 +143,6 @@ final class AutoUnlock: NSObject {
         }
     }
 
-    // MARK: Where the car is
-
     private func updateRegion() {
         for region in manager.monitoredRegions where region.identifier == Self.regionID {
             manager.stopMonitoring(for: region)
@@ -172,8 +167,6 @@ final class AutoUnlock: NSObject {
         guard isOn else { return }
         manager.requestLocation()
     }
-
-    // MARK: Approaching the car
 
     private var isArmed: Bool {
         guard let armedAt else { return false }
@@ -232,24 +225,30 @@ final class AutoUnlock: NSObject {
         Task {
             do {
                 try await link.send(.unlock)
-                notify("Unlocked as you walked up")
+                CarNotifications.post("Unlocked as you walked up")
             } catch BleCarLink.CommandError.unconfirmed {
-                notify("Sent unlock as you walked up, but the car didn't confirm. Check the car.")
+                CarNotifications.post("Sent unlock as you walked up, but the car didn't confirm. Check the car.")
             } catch {
-                notify("Auto-unlock didn't go through: \(error.localizedDescription)")
+                CarNotifications.post("Auto-unlock didn't go through: \(error.localizedDescription)")
             }
         }
     }
+}
 
-    private func notify(_ body: String) {
+/// Quiet notifications reporting what auto-unlock and auto-lock did.
+enum CarNotifications {
+    /// Provisional: no prompt, delivered silently to Notification Centre.
+    static func requestQuietPermission() {
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .provisional]) { _, _ in }
+    }
+
+    static func post(_ body: String) {
         let content = UNMutableNotificationContent()
         content.title = AppConfig.displayName
         content.body = body
         UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil))
     }
 }
-
-// MARK: - CLLocationManagerDelegate
 
 extension AutoUnlock: CLLocationManagerDelegate {
     nonisolated func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {

@@ -80,8 +80,6 @@ struct CarAPI {
             throw ServerError(message: detail ?? "Server error \(code)")
         }
 
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
-        return try decoder.decode(T.self, from: data)
+        return try CarStatus.decoder.decode(T.self, from: data)
     }
 }

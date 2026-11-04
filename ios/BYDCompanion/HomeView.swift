@@ -32,13 +32,11 @@ struct HomeView: View {
             }
         }
         .sheet(isPresented: $showingBluetooth) {
-            BluetoothSheet(link: model.ble, autoUnlock: model.autoUnlock, importing: model.importingKey) {
+            BluetoothSheet(link: model.ble, autoUnlock: model.autoUnlock, autoLock: model.autoLock, importing: model.importingKey) {
                 Task { await model.importBleKey() }
             }
         }
     }
-
-    // MARK: Sections
 
     private var header: some View {
         HStack(alignment: .center) {
@@ -201,8 +199,6 @@ struct HomeView: View {
             .padding(.bottom, 8)
         }
     }
-
-    // MARK: Text
 
     private var carName: String {
         let name = model.status?.model ?? "BYD"

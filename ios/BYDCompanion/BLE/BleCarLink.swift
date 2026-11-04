@@ -62,9 +62,11 @@ final class BleCarLink: NSObject {
     private(set) var readySince: Date?
 
     /// Called when the link becomes ready, when a ready link is lost, and on each signal reading.
-    var onReady: (() -> Void)?
-    var onLinkLost: (() -> Void)?
-    var onRSSI: ((Int) -> Void)?
+    /// Append to subscribe.
+    var onReady: [() -> Void] = []
+    var onLinkLost: [() -> Void] = []
+    var onRSSI: [(Int) -> Void] = []
+    private(set) var lastCommandAt: Date?
 
     private var central: CBCentralManager!
     private var peripheral: CBPeripheral?
@@ -85,6 +87,8 @@ final class BleCarLink: NSObject {
     private static let notifyID = CBUUID(string: BleCodec.notifyUUID)
     private static let savedPeripheralKey = "ble.peripheral.id"
     private static let restoreID = "car-link"
+    /// The signal `readRSSI()` reports in demo mode (dBm).
+    var demoSignal = -58
 
     override init() {
         super.init()
@@ -112,8 +116,6 @@ final class BleCarLink: NSObject {
         CarLinkState.ready = ready
         WidgetCenter.shared.reloadAllTimelines()
     }
-
-    // MARK: Public
 
     func installKey(_ newKey: BleKey) throws {
         try BleKeyStore.save(newKey)
@@ -163,7 +165,8 @@ final class BleCarLink: NSObject {
     func readRSSI() {
         guard state == .ready else { return }
         if AppConfig.demo {
-            rssi = Int.random(in: -60 ... -56)
+            rssi = demoSignal + Int.random(in: -2 ... 2)
+            onRSSI.forEach { $0(rssi!) }
             return
         }
         peripheral?.readRSSI()
@@ -171,6 +174,7 @@ final class BleCarLink: NSObject {
 
     /// Sends one control command and waits up to 3 s for the car's acknowledgement.
     func send(_ control: BleCodec.Control) async throws {
+        lastCommandAt = Date()
         if AppConfig.demo {
             note("→ control 0x\(String(format: "%02X", control.rawValue))")
             try? await Task.sleep(for: .milliseconds(300))
@@ -197,8 +201,6 @@ final class BleCarLink: NSObject {
         note("← control result \(reply[3])")
         guard reply[3] == 0x01 else { throw CommandError.rejected(reply[3]) }
     }
-
-    // MARK: Finding the car
 
     private func findCar() {
         if let saved = UserDefaults.standard.string(forKey: Self.savedPeripheralKey).flatMap(UUID.init),
@@ -257,10 +259,8 @@ final class BleCarLink: NSObject {
             // Callers that keep looking set .searching again afterwards.
             state = .stopped
         }
-        if wasReady { onLinkLost?() }
+        if wasReady { onLinkLost.forEach { $0() } }
     }
-
-    // MARK: Authentication
 
     private func authenticate() {
         guard let key else { return }
@@ -301,7 +301,7 @@ final class BleCarLink: NSObject {
                 state = .ready
                 readySince = Date()
                 note("Bluetooth ready")
-                onReady?()
+                onReady.forEach { $0() }
             } catch is CancellationError {
                 return
             } catch {
@@ -317,8 +317,6 @@ final class BleCarLink: NSObject {
         let message: String
         init(_ message: String) { self.message = message }
     }
-
-    // MARK: I/O helpers
 
     private func write(_ data: Data) async throws {
         guard let peripheral, let writeChar else { throw CommandError.notReady }
@@ -359,8 +357,6 @@ final class BleCarLink: NSObject {
         if log.count > 60 { log.removeFirst(log.count - 60) }
     }
 }
-
-// MARK: - CBCentralManagerDelegate
 
 extension BleCarLink: CBCentralManagerDelegate {
     nonisolated func centralManager(_ central: CBCentralManager, willRestoreState dict: [String: Any]) {
@@ -429,8 +425,6 @@ extension BleCarLink: CBCentralManagerDelegate {
     }
 }
 
-// MARK: - CBPeripheralDelegate
-
 extension BleCarLink: CBPeripheralDelegate {
     nonisolated func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: Error?) {
         MainActor.assumeIsolated {
@@ -487,7 +481,7 @@ extension BleCarLink: CBPeripheralDelegate {
         MainActor.assumeIsolated {
             guard error == nil, state == .ready else { return }
             rssi = RSSI.intValue
-            onRSSI?(RSSI.intValue)
+            onRSSI.forEach { $0(RSSI.intValue) }
         }
     }
 

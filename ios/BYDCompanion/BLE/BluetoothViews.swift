@@ -35,6 +35,7 @@ struct BluetoothChip: View {
 struct BluetoothSheet: View {
     let link: BleCarLink
     @Bindable var autoUnlock: AutoUnlock
+    @Bindable var autoLock: AutoLock
     var importing: Bool
     let importKey: () -> Void
     @Environment(\.dismiss) private var dismiss
@@ -57,9 +58,12 @@ struct BluetoothSheet: View {
                             .disabled(importing)
                     }
                 } footer: {
-                    Text("With the key, lock, unlock, trunk and honk go straight to the car over Bluetooth when you're nearby. Everything else, and anything out of range, uses BYD's cloud.")
+                    Text("Lock, unlock, trunk and honk go over Bluetooth when nearby; everything else via BYD's cloud.")
                 }
-                if link.hasKey { autoUnlockSection }
+                if link.hasKey {
+                    autoUnlockSection
+                    autoLockSection
+                }
                 Section("Recent events") {
                     if link.log.isEmpty {
                         Text("Nothing yet").foregroundStyle(.secondary)
@@ -131,11 +135,9 @@ struct BluetoothSheet: View {
                         ForEach(AutoUnlock.distances, id: \.self) { Text(AutoUnlock.label($0)).tag($0) }
                     }
                     .pickerStyle(.segmented)
-                    Text("Approximate. Walls, pockets and bags weaken the signal, so start short and widen it if it unlocks too late.")
+                    Text("Approximate. Widen it if it unlocks too late.")
                         .font(.footnote).foregroundStyle(.secondary)
-                    if let rssi = link.rssi {
-                        Text("Signal now: \(rssi) dBm").font(.footnote.monospacedDigit()).foregroundStyle(.secondary)
-                    }
+                    signalNow
                 }
                 .padding(.vertical, 4)
                 HStack(spacing: 6) {
@@ -148,7 +150,7 @@ struct BluetoothSheet: View {
                 }
             } else if autoUnlock.needsAlways {
                 VStack(alignment: .leading, spacing: 10) {
-                    Label("Auto-unlock needs location set to Always, so the app can wake up near the car when it's closed.", systemImage: "exclamationmark.triangle")
+                    Label("Needs location set to Always.", systemImage: "exclamationmark.triangle")
                         .font(.subheadline)
                         .symbolRenderingMode(.multicolor)
                     Button("Open Settings", action: autoUnlock.openSettings)
@@ -159,13 +161,75 @@ struct BluetoothSheet: View {
         } header: {
             Text("Auto-unlock")
         } footer: {
-            Text("Unlocks only after you've been away from the car and come back, never while you're already nearby. Always over Bluetooth, never through BYD's cloud.")
+            Text("Only after you've been away and come back. Bluetooth only.")
+        }
+    }
+
+    /// Live signal; in demo mode a long press steps it down.
+    @ViewBuilder private var signalNow: some View {
+        if let rssi = link.rssi {
+            Text("Signal now: \(rssi) dBm")
+                .font(.footnote.monospacedDigit())
+                .foregroundStyle(.secondary)
+                .onLongPressGesture {
+                    guard AppConfig.demo else { return }
+                    link.demoSignal = link.demoSignal <= -88 ? -58 : link.demoSignal - 10
+                }
+        }
+    }
+
+    private var autoLockSection: some View {
+        Section {
+            HStack(spacing: 12) {
+                Image(systemName: "lock.fill")
+                    .font(.system(size: 17, weight: .semibold))
+                    .foregroundStyle(Theme.accent)
+                    .frame(width: 36, height: 36)
+                    .background(RoundedRectangle(cornerRadius: 10).fill(Theme.cardBorder))
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Lock as I walk away")
+                    Text(autoLock.isOn ? "On · beyond about \(AutoUnlock.label(autoLock.distance))" : "Off")
+                        .font(.footnote).foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 8)
+                Toggle("Lock as I walk away", isOn: Binding(
+                    get: { autoLock.isOn },
+                    set: { $0 ? autoLock.enable() : autoLock.disable() }
+                ))
+                .labelsHidden()
+                .tint(Theme.accent)
+            }
+
+            if autoLock.isOn {
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack {
+                        Text("Lock distance")
+                        Spacer()
+                        Text("≈ \(AutoUnlock.label(autoLock.distance))").fontWeight(.semibold).foregroundStyle(Theme.accent)
+                    }
+                    Picker("Lock distance", selection: $autoLock.distance) {
+                        ForEach(AutoUnlock.distances, id: \.self) { Text(AutoUnlock.label($0)).tag($0) }
+                    }
+                    .pickerStyle(.segmented)
+                    Text("Approximate. Narrow it if it locks too late.")
+                        .font(.footnote).foregroundStyle(.secondary)
+                    signalNow
+                    Text(autoLock.statusText)
+                        .font(.footnote.monospacedDigit())
+                        .foregroundStyle(Theme.accent)
+                }
+                .padding(.vertical, 4)
+            }
+        } header: {
+            Text("Auto-lock")
+        } footer: {
+            Text("A few seconds after you walk past the chosen distance. Bluetooth only; not while the car is on or a door is open.")
         }
     }
 
     private var autoUnlockSubtitle: String {
         guard autoUnlock.isOn else { return "Off" }
-        guard autoUnlock.carLocation != nil else { return "On · connect to the car once so it knows where it's parked" }
+        guard autoUnlock.carLocation != nil else { return "On · connect once to learn where it's parked" }
         return "On · within about \(AutoUnlock.label(autoUnlock.distance))"
     }
 }
