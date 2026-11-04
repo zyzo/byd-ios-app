@@ -165,7 +165,7 @@ struct BluetoothSheet: View {
         }
     }
 
-    /// Live signal strength. In demo mode a long press steps the pretend signal down, to try auto-lock without a car.
+    /// Live signal; in demo mode a long press steps it down.
     @ViewBuilder private var signalNow: some View {
         if let rssi = link.rssi {
             Text("Signal now: \(rssi) dBm")

@@ -62,11 +62,10 @@ final class BleCarLink: NSObject {
     private(set) var readySince: Date?
 
     /// Called when the link becomes ready, when a ready link is lost, and on each signal reading.
-    /// Several features listen (auto-unlock, auto-lock), so each is a list; append to subscribe.
+    /// Append to subscribe.
     var onReady: [() -> Void] = []
     var onLinkLost: [() -> Void] = []
     var onRSSI: [(Int) -> Void] = []
-    /// When a control command was last sent, whoever sent it.
     private(set) var lastCommandAt: Date?
 
     private var central: CBCentralManager!
@@ -88,7 +87,7 @@ final class BleCarLink: NSObject {
     private static let notifyID = CBUUID(string: BleCodec.notifyUUID)
     private static let savedPeripheralKey = "ble.peripheral.id"
     private static let restoreID = "car-link"
-    /// Demo mode: the signal strength `readRSSI()` pretends to see (dBm).
+    /// The signal `readRSSI()` reports in demo mode (dBm).
     var demoSignal = -58
 
     override init() {

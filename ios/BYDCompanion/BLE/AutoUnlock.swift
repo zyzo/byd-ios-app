@@ -18,7 +18,7 @@ final class AutoUnlock: NSObject {
     static let distances = [50, 100, 200, 300, 500]
 
     /// Smoothed RSSI (dBm) that roughly matches each distance. Approximate:
-    /// walls, pockets and bags weaken the signal. Shared with auto-lock.
+    /// walls, pockets and bags weaken the signal.
     static let thresholds: [Int: Double] = [50: -55, 100: -62, 200: -67, 300: -71, 500: -76]
 
     /// "50 cm", "1 m", …
@@ -241,9 +241,9 @@ final class AutoUnlock: NSObject {
     }
 }
 
-/// Quiet notifications that report what auto-unlock and auto-lock did.
+/// Quiet notifications reporting what auto-unlock and auto-lock did.
 enum CarNotifications {
-    /// Provisional notifications need no prompt: they arrive silently in Notification Centre.
+    /// Provisional: no prompt, delivered silently to Notification Centre.
     static func requestQuietPermission() {
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .provisional]) { _, _ in }
     }

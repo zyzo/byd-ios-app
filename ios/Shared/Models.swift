@@ -14,14 +14,12 @@ struct CarStatus: Codable, Equatable {
     var windowsOpen: Bool?
     var acOn: Bool?
     var charging: Bool?
-    /// Ignition on, moving, or a door/trunk open. Auto-lock won't lock the car in any of these states.
     var powerOn: Bool?
     var speedKmh: Double?
     var anyDoorOpen: Bool?
     var tyresBar: Tyres
-    /// When the car produced the data (BYD's timestamp).
+    /// When the car produced the data, and when the server received it.
     var updatedAt: Date?
-    /// When the server received it, if it says.
     var receivedAt: Date?
 
     struct Tyres: Codable, Equatable {

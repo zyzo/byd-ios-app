@@ -3,38 +3,29 @@ import Observation
 
 /// Locks the car over Bluetooth as you walk away from it.
 ///
-/// - While connected, it watches the car's signal. Once the signal has been stronger than the
-///   chosen distance's threshold for a moment, it knows you were at the car ("near").
-/// - When the signal then stays weaker than that for a few seconds, it sends one lock over
-///   Bluetooth (never through the cloud) and stays quiet until the next visit.
-/// - If the link drops first, it locks when the link comes back within two minutes, provided
-///   you're still beyond the chosen distance.
-/// - It never locks a car that the server says is on, moving or has a door open, when that
-///   report is fresh. An old or missing report doesn't block the lock.
+/// Once the signal has been above the chosen distance's threshold for a moment you count as
+/// at the car; when it then stays below for a few seconds, one lock goes out over Bluetooth
+/// (never the cloud). If the link drops first, it locks on reconnect within two minutes.
+/// A fresh server report saying the car is on, moving or open vetoes the lock.
 @MainActor
 @Observable
 final class AutoLock {
     enum Phase: Equatable {
-        /// Connected, waiting to see you at the car.
         case idle
-        /// You're at the car.
         case near
-        /// Signal weak since the given time; locks once it has stayed weak long enough.
         case leaving(since: Date)
-        /// Locked (or decided not to) for this visit.
+        /// Locked, or decided not to, for this visit.
         case done
-        /// Link dropped while you were leaving; locks if it comes back by the given time.
+        /// Link dropped while leaving; locks if it comes back by then.
         case awaitingReconnect(until: Date)
     }
 
     static let defaultDistance = 300
-    /// The signal has to drop this far below the distance's threshold to count as leaving.
+    /// dB below the distance's threshold before the signal counts as weak.
     private static let hysteresis = 6.0
-    /// How long the signal must stay strong to count as being at the car.
     private static let nearHold: TimeInterval = 1.5
-    /// How long the signal must stay weak before locking.
     private static let holdTime: TimeInterval = 8
-    /// No auto-lock within this long of any Bluetooth command (a manual unlock, say).
+    /// No auto-lock within this long of any Bluetooth command.
     private static let cooldown: TimeInterval = 60
     private static let reconnectWindow: TimeInterval = 2 * 60
     /// A server report older than this can't veto a lock.
@@ -51,12 +42,12 @@ final class AutoLock {
         didSet { defaults.set(distance, forKey: Keys.distance) }
     }
     private(set) var phase: Phase = .idle
-    /// Seconds until the lock goes out while leaving, for the Bluetooth sheet.
+    /// Seconds until the lock goes out while leaving.
     private(set) var countdown: Int?
 
     private let link: BleCarLink
     private let api: CarAPI
-    /// The last status the app fetched, used when the server can't be reached in time.
+    /// Fallback when the server doesn't answer in time.
     private let cachedStatus: () -> CarStatus?
     private let defaults = UserDefaults.standard
     private var smoothed: Double?
@@ -100,7 +91,6 @@ final class AutoLock {
     }
 
     /// A lock or unlock was sent by hand: forget any walk-away in progress.
-    /// The cooldown (counted from the link's last command) delays the next auto-lock anyway.
     func manualCommandSent() {
         guard isOn else { return }
         switch phase {
@@ -114,7 +104,6 @@ final class AutoLock {
         }
     }
 
-    /// What the feature is doing right now, for the Bluetooth sheet.
     var statusText: String {
         guard link.state == .ready else {
             if case .awaitingReconnect = phase { return "Lost the car's signal · locks if it comes back within 2 min" }
@@ -242,7 +231,7 @@ final class AutoLock {
     // MARK: Locking
 
     private func lock(signal: Int) {
-        // Decide first: one attempt per visit, whatever the outcome.
+        // One attempt per visit, whatever the outcome.
         phase = .done
         lockPendingUntil = nil
         stopWatching()
@@ -271,7 +260,7 @@ final class AutoLock {
 
     private static let alreadyLocked = "already locked"
 
-    /// Why the car shouldn't be locked right now, according to a fresh server report; nil to go ahead.
+    /// Why not to lock, according to a fresh server report; nil to go ahead.
     private func vetoReason() async -> String? {
         let status = await fetchStatus() ?? cachedStatus()
         guard let status, let at = status.receivedAt ?? status.updatedAt,
@@ -283,7 +272,6 @@ final class AutoLock {
         return nil
     }
 
-    /// The server's cached report, or nil if it doesn't answer within a few seconds.
     private func fetchStatus() async -> CarStatus? {
         let fetch = Task { try? await api.status() }
         let limit = Task {
