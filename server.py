@@ -9,8 +9,8 @@ Deploy: see README.md (Cloudflare Containers).
 The process is meant to live for a long time: it logs in once, keeps pyBYD's MQTT
 connection open and feeds a state cache from every push the car sends. `GET /status`
 answers from that cache at once; `GET /status?refresh=true` asks the car for a new
-report and waits for it. The BYD login also happens lazily on the first request, so
-the same file still works as a serverless function (with no push-fed cache).
+report and waits for it. The BYD login happens at startup, and again lazily on the
+first request if that failed.
 """
 
 import asyncio
@@ -186,7 +186,7 @@ def _on_mqtt_event(event: str, vin: str, data: dict[str, Any]) -> None:
 
 
 async def ensure_client() -> BydClient:
-    """Logs in to BYD on first use (the lifespan does it at startup; serverless hosts don't run lifespans)."""
+    """Logs in to BYD on first use (the lifespan does it at startup; this is the fallback)."""
     if state.client is not None:
         return state.client
     async with state.lock:

@@ -75,8 +75,6 @@ If **Trunk** or **Windows** fail with "Remote command … blocked … reason=fun
 
 To run it on your Mac instead: `.venv/bin/uvicorn server:app --host 127.0.0.1 --port 8765`, and expose it to the iPhone however you like. Run only one copy of the server per BYD account: BYD allows one push connection per login, and two servers keep kicking each other off it.
 
-`vercel.json` still deploys the server to [Vercel](https://vercel.com) as a serverless function (`vercel --prod`, then copy the variables from `.env` with `vercel env add`). That works, but each cold start logs in again and there is no process left running to receive the car's pushes, so data is often stale. It isn't recommended any more.
-
 ### What the server returns
 
 `GET /status` answers from the cache at once, without talking to BYD. Besides the car's data it returns:
