@@ -96,6 +96,18 @@ To run it on your Mac instead: `.venv/bin/uvicorn server:app --host 127.0.0.1 --
 | `stale` | `true` when a refresh was asked for and the car didn't answer with anything newer |
 | `powerOn`, `speedKmh`, `anyDoorOpen` | Whether the car is on, how fast it's going, and whether any door or the trunk is open; auto-lock checks these before locking |
 
+`GET /status` also returns `fuelPercent`, the fuel level in percent of the tank. It is `null` on cars that don't report it.
+
+Three more routes feed the trip log (the Cloudflare Worker pulls the first two on its 5-minute cron; all three need the token):
+
+| Route | Returns |
+| --- | --- |
+| `GET /snapshots?since=<iso8601>` | `{"snapshots": [{"at", "receivedAt", "odometerKm", "batteryPercent", "fuelPercent", "rangeElectricKm", "rangeFuelKm", "powerOn", "charging", "source"}], "serverStartedAt"}`: the last 300 changes of the car's state (a snapshot is kept whenever the car turns on or off, the odometer moves or charging starts or stops), ascending by `at`, after `since` when given. In memory only, so it empties when the container restarts. |
+| `GET /prices` | `{"petrol": {"product": "E10 RON 95-III", "zone": 1, "vndPerLitre", "source", "cycle", "fetchedAt", "stale"}, "electricityHint": {"tariffFrom", "vatPercent", "tiersVndPerKwh", "tierUpToKwh"}, "capacityHint": {"model", "batteryKwh", "tankLitres"}}`: the Petrolimex zone 1 price of the petrol the car takes, the EVN household tariff ladder as a hint, and the battery and tank sizes known for the model (`null` for unknown models). |
+| `GET /energy` | `{"last50km": {"evKwh", "petrolLitres", "avgEvKwhPer100km", "avgPetrolLPer100km", "electricSharePercent"}, "lifetime": {"avgEvKwhPer100km", "avgPetrolLPer100km", "totalMileageKm"}, "updatedAt"}`: BYD's own consumption figures, cached 10 minutes; 503 when BYD doesn't answer and nothing is cached yet. |
+
+The petrol price is scraped from [webgia.com](https://webgia.com/gia-xang-dau/) and, when that fails, from the [vietfuel-api](https://vietfuel-api.tranqui.workers.dev/api/fuel-prices/petrolimex) and [thiennhat-gia-xang-dau](https://github.com/thiennhatgroup/thiennhat-gia-xang-dau) JSON mirrors. It is checked every 6 hours, hourly on Thursday afternoons and evenings (Vietnam time) when the state adjusts prices; when every source fails the last good value is served with `stale: true`.
+
 `GET /status?refresh=true` asks the car for a new report and waits for one that is newer than what the cache had (up to about 25 seconds), so it never returns BYD's old cached snapshot. If the car doesn't answer, it returns the cache with `stale: true`. The server also asks the car for a report a few seconds after every command, and whenever nothing has arrived for `BYD_POLL_MINUTES` (default 15), so the cache never gets older than that while the car is reachable.
 
 ### Trip log

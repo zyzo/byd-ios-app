@@ -18,13 +18,16 @@ import contextvars
 import json
 import logging
 import os
+import re
 import secrets
 import time
+from collections import deque
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+import httpx
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, Header, HTTPException
 from pydantic import BaseModel
@@ -39,6 +42,7 @@ from pybyd.models.realtime import DoorOpenState, LockState, TirePressureUnit, Ve
 load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("byd-server")
+logging.getLogger("httpx").setLevel(logging.WARNING)  # one line per fetch is logged below instead
 
 APP_TOKEN = os.environ["APP_TOKEN"]
 SKIP_COMMAND_GATE = os.environ.get("BYD_SKIP_COMMAND_GATE", "").lower() in ("1", "true", "yes")
@@ -53,6 +57,21 @@ REFRESH_HARD_CAP = 40.0
 REFRESH_MIN_GAP = 5.0
 # A command's expected state overlays the cache until the car confirms or contradicts it, at most this long.
 PROJECTION_TTL = 120.0
+# Snapshots kept in memory for GET /snapshots (the Worker pulls them every 5 minutes).
+SNAPSHOT_RING = 300
+# Outbound HTTP (petrol prices): timeout and a browser-like agent, since webgia serves plain pages to browsers.
+HTTP_TIMEOUT = 10.0
+USER_AGENT = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/130.0.0.0 Safari/537.36"
+)
+VIETNAM_TZ = timezone(timedelta(hours=7))
+# Petrol prices change on the state's cycle (Thursdays 15:00, sometimes 22:00 Vietnam time): check
+# hourly in that window, every 6 hours otherwise, and again after 15 minutes when every source failed.
+PRICES_TTL_CYCLE_DAY = timedelta(hours=1)
+PRICES_TTL = timedelta(hours=6)
+PRICES_RETRY = timedelta(minutes=15)
+ENERGY_TTL = timedelta(minutes=10)
 
 if SKIP_COMMAND_GATE:
     # pyBYD refuses commands that BYD's feature list for the car doesn't advertise, for example
@@ -136,6 +155,8 @@ class State:
     fresh_at = 0.0  # monotonic time of the last report newer than what we had
     refresh_task: asyncio.Task | None = None
     poller: asyncio.Task | None = None
+    started_at: datetime = datetime.now(UTC)
+    trips: "TripWatch"
 
 
 state = State()
@@ -156,6 +177,65 @@ def age_text(stamp: datetime | None) -> str:
     return "unknown age" if stamp is None else f"{(utcnow() - stamp).total_seconds():.0f}s old"
 
 
+def iso_utc(stamp: datetime) -> str:
+    return stamp.astimezone(UTC).isoformat(timespec="seconds")
+
+
+class TripWatch:
+    """Compact snapshots of the car's state, one per change, for the Worker to turn into trips.
+
+    A snapshot is taken from every realtime report (push or poll) whose power state, odometer or
+    charging flag differs from the last one kept, plus the first report after start. Reports with
+    no timestamp, a zero odometer (the car asleep) or older than the last snapshot are ignored.
+    The ring lives in memory only: the Worker pulls it every few minutes into durable storage.
+    """
+
+    def __init__(self, size: int = SNAPSHOT_RING) -> None:
+        self.snapshots: deque[dict[str, Any]] = deque(maxlen=size)
+
+    def record(self, rt: VehicleRealtimeData, source: str) -> bool:
+        if rt.timestamp is None or not rt.total_mileage:
+            return False
+        last = self.snapshots[-1] if self.snapshots else None
+        if last is not None and rt.timestamp < last["at"]:
+            return False
+        snapshot = {
+            "at": rt.timestamp,
+            "receivedAt": utcnow(),
+            "odometerKm": rt.total_mileage,
+            "batteryPercent": rt.elec_percent,
+            "fuelPercent": rt.oil_percent,
+            "rangeElectricKm": rt.ev_endurance,
+            "rangeFuelKm": rt.oil_endurance,
+            "powerOn": rt.is_vehicle_on,
+            "charging": rt.is_charging,
+            "source": source,
+        }
+        if last is not None and all(last[k] == snapshot[k] for k in ("powerOn", "odometerKm", "charging")):
+            return False
+        self.snapshots.append(snapshot)
+        log.info(
+            "Snapshot %d (%s): odometer=%s battery=%s fuel=%s powerOn=%s charging=%s (%s)",
+            len(self.snapshots),
+            source,
+            rt.total_mileage,
+            rt.elec_percent,
+            rt.oil_percent,
+            rt.is_vehicle_on,
+            rt.is_charging,
+            age_text(rt.timestamp),
+        )
+        return True
+
+    def since(self, after: datetime | None) -> list[dict[str, Any]]:
+        rows = [s for s in self.snapshots if after is None or s["at"] > after]
+        rows.sort(key=lambda s: s["at"])
+        return [{**s, "at": iso_utc(s["at"]), "receivedAt": iso_utc(s["receivedAt"])} for s in rows]
+
+
+state.trips = TripWatch()
+
+
 def _on_vehicle_info(vin: str, rt: VehicleRealtimeData) -> None:
     """pyBYD calls this for every MQTT vehicleInfo push, before routing it to the car's state engine."""
     if vin != state.vin:
@@ -170,6 +250,7 @@ def _on_vehicle_info(vin: str, rt: VehicleRealtimeData) -> None:
         log.info("Push raw: %s", {k: v for k, v in rt.raw.items() if k in ("time","onlineState","connectState","vehicleState","requestSerial","elecPercent","leftFrontDoorLock","chargeState","timeStamp","updateTime")})
     if rt.timestamp is not None and (current is None or rt.timestamp > current):
         state.fresh_at = time.monotonic()
+    state.trips.record(rt, "push")
     log.info(
         "Push: battery=%s locked=%s charging=%s time=%s (%s)",
         rt.elec_percent,
@@ -222,6 +303,7 @@ async def merge_realtime(rt: VehicleRealtimeData, source: str) -> None:
     state.source = source
     if rt.timestamp is not None and (current is None or rt.timestamp > current):
         state.fresh_at = time.monotonic()
+    state.trips.record(rt, source)
     log.info("Poll: battery=%s locked=%s (%s)", rt.elec_percent, rt.is_locked, age_text(rt.timestamp))
     if os.environ.get("BYD_DEBUG_RAW"):
         log.info("Poll raw: %s", {k: v for k, v in rt.raw.items() if k in ("time","onlineState","connectState","vehicleState","requestSerial","elecPercent","leftFrontDoorLock","chargeState","timeStamp","updateTime")})
@@ -357,6 +439,7 @@ def build_status(stale: bool = False) -> dict:
         "model": state.vehicle.model_name,
         "plate": state.vehicle.auto_plate,
         "batteryPercent": rt.elec_percent,
+        "fuelPercent": rt.oil_percent,
         "rangeTotalKm": rt.endurance_mileage,
         "rangeElectricKm": rt.ev_endurance,
         "rangeFuelKm": rt.oil_endurance,
@@ -410,6 +493,302 @@ async def status(refresh: bool = False) -> dict:
         return build_status(stale=not await refresh_status("request"))
     except BydApiError as e:
         raise HTTPException(status_code=502, detail=f"BYD error {e.code}: {e}") from e
+
+
+def parse_since(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    text = value.strip().replace("Z", "+00:00")
+    try:
+        stamp = datetime.fromisoformat(text)
+    except ValueError:
+        try:
+            # A "+" in the query string arrives as a space unless the caller encoded it.
+            stamp = datetime.fromisoformat(text.replace(" ", "+"))
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=f"since must be ISO 8601, got {value!r}") from e
+    return stamp if stamp.tzinfo else stamp.replace(tzinfo=UTC)
+
+
+@app.get("/snapshots", dependencies=[Depends(require_token)])
+async def snapshots(since: str | None = None) -> dict:
+    """The in-memory snapshot ring (see TripWatch), ascending, after `since` when given."""
+    return {
+        "snapshots": state.trips.since(parse_since(since)),
+        "serverStartedAt": iso_utc(state.started_at),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Petrol prices and energy figures
+# ---------------------------------------------------------------------------
+#
+# Petrol: there is no official API, so the price of E10 RON 95-III in zone 1 (Vùng 1) comes from
+# webgia.com's HTML table, with two community JSON mirrors as fallbacks. The last good value is
+# kept and served with `stale: true` when every source fails. Electricity has no live source:
+# the EVN household ladder is a constant hint for the app's settings screen.
+
+ELECTRICITY_HINT = {
+    "tariffFrom": "2026-11-01",
+    "vatPercent": 8,
+    "tiersVndPerKwh": [1901, 2289, 2894, 3456, 3844],
+    "tierUpToKwh": [100, 200, 400, 700, None],
+}
+# Usable battery (kWh) and tank (litres) by model, since BYD's API has neither.
+CAPACITIES: dict[str, tuple[float, float]] = {
+    "SEALION 6": (18.3, 60),
+}
+
+
+def capacity_hint() -> dict:
+    model = state.vehicle.model_name if state.vehicle is not None else None
+    battery, tank = next(
+        (c for key, c in CAPACITIES.items() if model and key in model.upper()),
+        (None, None),
+    )
+    return {"model": model, "batteryKwh": battery, "tankLitres": tank}
+
+
+def vnd(value: Any) -> int | None:
+    """23230, 23230.0, "23.230", "23,230" or "23.230,5" to whole dong."""
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return int(round(value)) or None
+    text = str(value).strip()
+    text = re.sub(r"[.,](\d{1,2})$", "", text)  # drop a decimal part
+    digits = re.sub(r"\D", "", text)
+    return int(digits) if digits else None
+
+
+def strip_tags(html: str) -> str:
+    return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", html)).strip()
+
+
+WEBGIA_LABELS = {
+    "E10 RON 95-III": ("RON 95", "mức 3"),
+    "E10 RON 95-V": ("RON 95", "mức 5"),
+    "E5 RON 92-II": ("E5 RON 92",),
+}
+
+
+def parse_webgia(html: str) -> dict[str, int]:
+    """Product name -> zone 1 price (VND) from the Petrolimex table on webgia.com."""
+    prices: dict[str, int] = {}
+    for row in re.findall(r"<tr[^>]*>(.*?)</tr>", html, re.S):
+        cells = [strip_tags(c) for c in re.findall(r"<t[hd][^>]*>(.*?)</t[hd]>", row, re.S)]
+        if len(cells) < 2 or not cells[0].startswith("Xăng"):
+            continue
+        for product, needles in WEBGIA_LABELS.items():
+            if product not in prices and all(n in cells[0] for n in needles):
+                price = vnd(cells[1])
+                if price:
+                    prices[product] = price
+    return prices
+
+
+async def fetch_webgia(http: httpx.AsyncClient) -> dict:
+    r = await http.get("https://webgia.com/gia-xang-dau/")
+    r.raise_for_status()
+    prices = parse_webgia(r.text)
+    if "E10 RON 95-III" not in prices:
+        raise ValueError(f"RON 95-III row not found (parsed {sorted(prices)})")
+    return {"vndPerLitre": prices.pop("E10 RON 95-III"), "cycle": None, "otherProducts": prices}
+
+
+def find_entries(data: Any) -> list[dict]:
+    """The list of {name, region1, ...} entries wherever the vietfuel JSON puts it."""
+    if isinstance(data, list):
+        return [d for d in data if isinstance(d, dict)]
+    if isinstance(data, dict):
+        if "name" in data:
+            return [data]
+        for value in data.values():
+            found = find_entries(value)
+            if found and any("name" in d for d in found):
+                return found
+    return []
+
+
+async def fetch_vietfuel(http: httpx.AsyncClient) -> dict:
+    r = await http.get("https://vietfuel-api.tranqui.workers.dev/api/fuel-prices/petrolimex")
+    r.raise_for_status()
+    entries = find_entries(r.json())
+    others: dict[str, int] = {}
+    price = None
+    for entry in entries:
+        name = str(entry.get("name", ""))
+        value = vnd(entry.get("region1"))
+        if not value:
+            continue
+        if "RON 95" in name and ("III" in name or "95-3" in name):
+            price = price or value
+        elif "RON 95" in name or "RON 92" in name:
+            others[name] = value
+    if price is None:
+        raise ValueError(f"RON 95-III not in {[e.get('name') for e in entries]}")
+    return {"vndPerLitre": price, "cycle": None, "otherProducts": others}
+
+
+async def fetch_thiennhat(http: httpx.AsyncClient) -> dict:
+    r = await http.get(
+        "https://raw.githubusercontent.com/thiennhatgroup/thiennhat-gia-xang-dau/main/data/gia-xang-dau.json"
+    )
+    r.raise_for_status()
+    data = r.json()
+    products: dict[str, Any] = data.get("gia") or {}
+    ron95 = next(
+        (p for p in products.values() if "RON 95" in str(p.get("ten", "")) and "III" in str(p.get("ten", ""))),
+        None,
+    )
+    if ron95 is None or not vnd(ron95.get("v1")):
+        raise ValueError(f"RON 95-III missing (trang_thai={data.get('trang_thai')})")
+    cycle = None
+    if data.get("ky"):
+        try:
+            day = datetime.strptime(data["ky"], "%d/%m/%Y")
+            hour, minute = (int(x) for x in str(data.get("gio_hieu_luc") or "15:00").split(":")[:2])
+            cycle = day.replace(hour=hour, minute=minute, tzinfo=VIETNAM_TZ).isoformat()
+        except ValueError:
+            cycle = None
+    others = {
+        str(p["ten"]): vnd(p.get("v1"))
+        for key, p in products.items()
+        if p is not ron95 and "Xăng" in str(p.get("ten", "")) and vnd(p.get("v1"))
+    }
+    return {"vndPerLitre": vnd(ron95["v1"]), "cycle": cycle, "otherProducts": others}
+
+
+PETROL_SOURCES = (("webgia", fetch_webgia), ("vietfuel", fetch_vietfuel), ("thiennhat", fetch_thiennhat))
+
+
+class PriceCache:
+    petrol: dict | None = None  # last good value, as served
+    checked_at: datetime | None = None
+    failed = False
+    lock = asyncio.Lock()
+
+
+prices_cache = PriceCache()
+
+
+def prices_ttl(now: datetime) -> timedelta:
+    if prices_cache.failed:
+        return PRICES_RETRY
+    local = now.astimezone(VIETNAM_TZ)
+    if local.weekday() == 3 and 14 <= local.hour <= 23:
+        return PRICES_TTL_CYCLE_DAY
+    return PRICES_TTL
+
+
+async def fetch_petrol_price() -> dict | None:
+    """First source that answers wins; None when all failed."""
+    async with httpx.AsyncClient(timeout=HTTP_TIMEOUT, headers={"User-Agent": USER_AGENT}, follow_redirects=True) as http:
+        for name, fetch in PETROL_SOURCES:
+            started = time.monotonic()
+            try:
+                found = await fetch(http)
+            except Exception as e:  # noqa: BLE001
+                log.info("Prices: %s failed after %.1fs: %s", name, time.monotonic() - started, e)
+                continue
+            log.info(
+                "Prices: E10 RON 95-III zone 1 = %d VND/L from %s in %.1fs (cycle %s)",
+                found["vndPerLitre"],
+                name,
+                time.monotonic() - started,
+                found["cycle"],
+            )
+            return {
+                "product": "E10 RON 95-III",
+                "zone": 1,
+                "vndPerLitre": found["vndPerLitre"],
+                "source": name,
+                "cycle": found["cycle"],
+                "fetchedAt": iso_utc(utcnow()),
+                "stale": False,
+                "otherProducts": found["otherProducts"],
+            }
+    return None
+
+
+async def petrol_price() -> dict | None:
+    now = utcnow()
+    async with prices_cache.lock:
+        if prices_cache.checked_at is None or now - prices_cache.checked_at > prices_ttl(now):
+            found = await fetch_petrol_price()
+            prices_cache.checked_at = now
+            prices_cache.failed = found is None
+            if found is not None:
+                prices_cache.petrol = found
+            elif prices_cache.petrol is not None:
+                log.warning("Prices: every source failed, serving %s value from %s", prices_cache.petrol["source"], prices_cache.petrol["fetchedAt"])
+        if prices_cache.petrol is None:
+            return None
+        return {**prices_cache.petrol, "stale": prices_cache.failed}
+
+
+@app.get("/prices", dependencies=[Depends(require_token)])
+async def prices() -> dict:
+    """Petrol price (E10 RON 95-III, zone 1) plus the constants the app's cost estimate needs."""
+    petrol = await petrol_price()
+    if petrol is None:
+        raise HTTPException(status_code=503, detail="No petrol price source answered yet")
+    return {"petrol": petrol, "electricityHint": ELECTRICITY_HINT, "capacityHint": capacity_hint()}
+
+
+class EnergyCache:
+    value: dict | None = None
+    fetched_at: datetime | None = None
+    lock = asyncio.Lock()
+
+
+energy_cache = EnergyCache()
+
+
+@app.get("/energy", dependencies=[Depends(require_token)])
+async def energy() -> dict:
+    """BYD's own last-50 km and lifetime consumption figures, cached 10 minutes, best effort."""
+    now = utcnow()
+    async with energy_cache.lock:
+        if energy_cache.value is not None and energy_cache.fetched_at is not None and now - energy_cache.fetched_at < ENERGY_TTL:
+            return energy_cache.value
+        try:
+            client = await ensure_client()
+            data = await client.get_energy_consumption(state.vin)
+        except Exception as e:  # noqa: BLE001
+            log.info("Energy read failed: %s", e)
+            if energy_cache.value is not None:
+                return energy_cache.value  # the previous figures, with their own updatedAt
+            raise HTTPException(status_code=503, detail=f"Energy figures unavailable: {e}") from e
+        last = data.nearest_energy_consumption
+        total = data.cumulative_energy_consumption
+        energy_cache.value = {
+            "last50km": {
+                "evKwh": last.ev_consumption if last else None,
+                "petrolLitres": last.oil_consumption if last else None,
+                "avgEvKwhPer100km": last.avg_ev_consumption if last else None,
+                "avgPetrolLPer100km": last.avg_oil_consumption if last else None,
+                "electricSharePercent": last.elect_distribution if last else None,
+            },
+            "lifetime": {
+                "avgEvKwhPer100km": total.avg_ev_consumption if total else None,
+                "avgPetrolLPer100km": total.avg_oil_consumption if total else None,
+                "totalMileageKm": total.total_mileage if total else None,
+            },
+            "updatedAt": iso_utc(now),
+        }
+        energy_cache.fetched_at = now
+        log.info(
+            "Energy: last 50 km ev=%s kWh petrol=%s L electric=%s%%, lifetime %s kWh/100km %s L/100km over %s km (car time %s)",
+            energy_cache.value["last50km"]["evKwh"],
+            energy_cache.value["last50km"]["petrolLitres"],
+            energy_cache.value["last50km"]["electricSharePercent"],
+            energy_cache.value["lifetime"]["avgEvKwhPer100km"],
+            energy_cache.value["lifetime"]["avgPetrolLPer100km"],
+            energy_cache.value["lifetime"]["totalMileageKm"],
+            data.timestamp.isoformat(timespec="seconds") if data.timestamp else None,
+        )
+        return energy_cache.value
 
 
 BLE_KEY_FILE = Path(__file__).parent / "ble_key.json"
