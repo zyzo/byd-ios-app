@@ -162,13 +162,6 @@ struct TripsSheet: View {
                     }
                 }
 
-                if weekTrips.isEmpty {
-                    Section {
-                        Text("No trips this week")
-                            .font(.system(size: 13)).foregroundStyle(Theme.muted)
-                            .listRowBackground(Theme.card)
-                    }
-                }
                 ForEach(TripMath.byDay(weekTrips), id: \.day) { group in
                     Section {
                         ForEach(group.trips) { trip in
@@ -250,8 +243,9 @@ struct WeekCard: View {
                 Spacer()
                 VStack(spacing: 2) {
                     Text(week.title).font(.system(size: 15, weight: .semibold)).foregroundStyle(Theme.text)
-                    Text(week.title == week.range ? "swipe for other weeks" : "\(week.range) · swipe for other weeks")
-                        .font(.system(size: 12)).foregroundStyle(Theme.muted)
+                    if week.title != week.range {
+                        Text(week.range).font(.system(size: 12)).foregroundStyle(Theme.muted)
+                    }
                 }
                 Spacer()
                 arrow("chevron.right", "Next week", action: next).opacity(isCurrent ? 0.35 : 1).disabled(isCurrent)
@@ -269,8 +263,8 @@ struct WeekCard: View {
             HStack {
                 if let cost = totals.cost, let perKm = totals.costPerKm {
                     Text("≈ \(Money.kdong(cost)) · \(Money.kdong(perKm, per: "km"))")
-                } else {
-                    Text(trips.isEmpty ? "No trips this week" : "Cost unknown: set the prices behind the gear")
+                } else if !trips.isEmpty {
+                    Text("Cost unknown: set the prices behind the gear")
                 }
                 Spacer()
             }
