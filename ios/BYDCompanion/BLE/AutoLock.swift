@@ -71,8 +71,6 @@ final class AutoLock {
         if link.state == .ready { sessionStarted() }
     }
 
-    // MARK: Switching on and off
-
     func enable() {
         isOn = true
         defaults.set(true, forKey: Keys.wanted)
@@ -117,8 +115,6 @@ final class AutoLock {
         case .awaitingReconnect: return "Reconnected · checking the signal"
         }
     }
-
-    // MARK: Sessions
 
     private func sessionStarted() {
         guard isOn else { return }
@@ -168,8 +164,6 @@ final class AutoLock {
         strongSince = nil
         countdown = nil
     }
-
-    // MARK: Watching the signal
 
     private func evaluate(_ rssi: Int) {
         guard isOn, timer != nil, let threshold = AutoUnlock.thresholds[distance] else { return }
@@ -227,8 +221,6 @@ final class AutoLock {
         guard let last = link.lastCommandAt else { return 0 }
         return Self.cooldown - now.timeIntervalSince(last)
     }
-
-    // MARK: Locking
 
     private func lock(signal: Int) {
         // One attempt per visit, whatever the outcome.
