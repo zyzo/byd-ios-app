@@ -1,43 +1,53 @@
 import SwiftUI
 
-/// Small status pill: shows whether commands go straight to the car over Bluetooth.
+/// Small pill: a Bluetooth icon, with a label only while the car is reachable over Bluetooth.
 struct BluetoothChip: View {
     let link: BleCarLink
     var importing = false
     let action: () -> Void
 
-    private var color: Color {
-        switch link.state {
-        case .ready: Theme.accent
-        case .failed, .bluetoothOff: Theme.warning
-        default: Theme.muted
-        }
-    }
-
-    private var busy: Bool {
-        importing || [.searching, .connecting, .authenticating].contains(link.state)
-    }
+    private var active: Bool { link.state == .ready }
 
     var body: some View {
         Button(action: action) {
             HStack(spacing: 6) {
-                if busy {
-                    ProgressView().controlSize(.mini).tint(Theme.muted)
-                } else {
-                    Image(systemName: link.state == .ready ? "dot.radiowaves.left.and.right" : "antenna.radiowaves.left.and.right.slash")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(color)
+                BluetoothRune()
+                    .stroke(active ? Theme.accent : Theme.muted, style: StrokeStyle(lineWidth: 1.6, lineCap: .round, lineJoin: .round))
+                    .frame(width: 8, height: 13)
+                if active {
+                    Text("Bluetooth")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(Color(hex: 0xC9D1D9))
+                        .lineLimit(1)
                 }
-                Text(link.hasKey ? link.state.label : "Set up Bluetooth key")
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(Color(hex: 0xC9D1D9))
-                    .lineLimit(1)
             }
-            .padding(.horizontal, 10)
+            .padding(.horizontal, active ? 10 : 9)
             .padding(.vertical, 6)
         }
-        .buttonStyle(RaisedButtonStyle(active: link.state == .ready, cornerRadius: 14))
+        .buttonStyle(RaisedButtonStyle(active: active, cornerRadius: 14))
+        .accessibilityLabel("Bluetooth")
+        .accessibilityValue(link.hasKey ? link.state.label : "Key not set up")
         .accessibilityHint("Shows Bluetooth details")
+    }
+}
+
+/// The Bluetooth rune, since SF Symbols has no Bluetooth glyph.
+struct BluetoothRune: Shape {
+    func path(in r: CGRect) -> Path {
+        var p = Path()
+        let w = r.width, h = r.height
+        // Vertical stem.
+        p.move(to: CGPoint(x: r.minX + w * 0.5, y: r.minY))
+        p.addLine(to: CGPoint(x: r.minX + w * 0.5, y: r.maxY))
+        // Upper triangle.
+        p.move(to: CGPoint(x: r.minX, y: r.minY + h * 0.27))
+        p.addLine(to: CGPoint(x: r.maxX, y: r.minY + h * 0.73))
+        p.addLine(to: CGPoint(x: r.minX + w * 0.5, y: r.maxY))
+        // Lower triangle.
+        p.move(to: CGPoint(x: r.minX, y: r.minY + h * 0.73))
+        p.addLine(to: CGPoint(x: r.maxX, y: r.minY + h * 0.27))
+        p.addLine(to: CGPoint(x: r.minX + w * 0.5, y: r.minY))
+        return p
     }
 }
 
