@@ -5,8 +5,11 @@ import WidgetKit
 @MainActor
 @Observable
 final class CarViewModel {
-    var status: CarStatus?
+    /// What the car last reported, or what it reported last time the app ran until the server answers.
+    var status: CarStatus? = StatusCache.load()
     var isRefreshing = false
+    /// `status` came from the cache and the server hasn't confirmed it yet this run.
+    var stale = true
     var pending: Set<Control> = []
     var errorMessage: String?
     var importingKey = false
@@ -31,6 +34,8 @@ final class CarViewModel {
         defer { isRefreshing = false }
         do {
             status = try await api.status(refresh: refresh)
+            stale = false
+            StatusCache.save(status)
             errorMessage = nil
             WidgetCenter.shared.reloadAllTimelines()
         } catch {
@@ -120,5 +125,24 @@ final class CarViewModel {
             try? await Task.sleep(for: .seconds(8))
             await load(refresh: true)
         }
+    }
+}
+
+/// The last status the server returned, kept so the app can show it right away on the next launch.
+enum StatusCache {
+    private static let key = "app.lastStatus"
+
+    static func load() -> CarStatus? {
+        guard !AppConfig.demo, let data = UserDefaults.standard.data(forKey: key) else { return nil }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return try? decoder.decode(CarStatus.self, from: data)
+    }
+
+    static func save(_ status: CarStatus?) {
+        guard !AppConfig.demo else { return }
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        UserDefaults.standard.set(try? encoder.encode(status), forKey: key)
     }
 }

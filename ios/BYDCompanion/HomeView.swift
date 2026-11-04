@@ -9,14 +9,12 @@ struct HomeView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 header
-                if let status = model.status {
-                    content(status)
-                } else if model.errorMessage == nil {
-                    ProgressView("Reading your car…")
-                        .tint(Theme.text)
-                        .foregroundStyle(Theme.muted)
-                        .frame(maxWidth: .infinity, minHeight: 400)
-                }
+                // Until the server answers, show the last known car (or a placeholder) dimmed and
+                // untouchable; the chip under the range says it's being read.
+                content(model.status ?? .sample)
+                    .redacted(reason: model.status == nil ? .placeholder : [])
+                    .disabled(model.stale)
+                    .animation(.easeInOut(duration: 0.25), value: model.stale)
             }
             .padding(.horizontal, 20)
             .padding(.top, 8)
@@ -69,6 +67,7 @@ struct HomeView: View {
                         .foregroundColor(Theme.text)
                         + Text("%").font(.system(size: 28, weight: .bold)).foregroundColor(Theme.muted))
                 }
+                .opacity(dim)
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Total range").font(.system(size: 13)).foregroundStyle(Theme.muted)
                     (Text("\(Int((s.rangeTotalKm ?? 0).rounded())) ")
@@ -76,6 +75,7 @@ struct HomeView: View {
                         .foregroundColor(Theme.text)
                         + Text("km").font(.system(size: 15)).foregroundColor(Theme.muted))
                 }
+                .opacity(dim)
                 statusPill(s)
             }
             Spacer(minLength: 8)
@@ -85,50 +85,72 @@ struct HomeView: View {
                 windowsOpen: s.windowsOpen ?? false,
                 acOn: s.acOn ?? false
             )
+            .opacity(dim)
         }
 
-        RangeBar(electricKm: s.rangeElectricKm ?? 0, fuelKm: s.rangeFuelKm ?? 0)
+        Group {
+            RangeBar(electricKm: s.rangeElectricKm ?? 0, fuelKm: s.rangeFuelKm ?? 0)
 
-        LockButton(locked: s.locked ?? true, busy: model.pending.contains(.lock), action: model.toggleLock)
+            LockButton(locked: s.locked ?? true, busy: model.pending.contains(.lock), action: model.toggleLock)
 
-        LazyVGrid(columns: [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)], spacing: 12) {
-            ControlTile(
-                title: "Trunk",
-                systemImage: "car.side.rear.open",
-                detail: s.trunkOpen == true ? "Open" : nil,
-                active: s.trunkOpen == true,
-                busy: model.pending.contains(.trunk),
-                action: model.toggleTrunk
-            )
-            ControlTile(
-                title: "Windows",
-                systemImage: "window.vertical.open",
-                detail: s.windowsOpen == true ? "Vent 10%" : nil,
-                active: s.windowsOpen == true,
-                busy: model.pending.contains(.windows),
-                action: model.toggleWindows
-            )
-            ControlTile(
-                title: "A/C",
-                systemImage: "snowflake",
-                detail: s.acOn == true ? "On · 21°" : nil,
-                active: s.acOn == true,
-                busy: model.pending.contains(.ac),
-                action: model.toggleAC
-            )
-            ControlTile(
-                title: "Honk",
-                systemImage: "speaker.wave.3.fill",
-                detail: model.pending.contains(.honk) ? "Horn & lights…" : nil,
-                active: model.pending.contains(.honk),
-                action: model.honk
-            )
+            LazyVGrid(columns: [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)], spacing: 12) {
+                ControlTile(
+                    title: "Trunk",
+                    systemImage: "car.side.rear.open",
+                    detail: s.trunkOpen == true ? "Open" : nil,
+                    active: s.trunkOpen == true,
+                    busy: model.pending.contains(.trunk),
+                    action: model.toggleTrunk
+                )
+                ControlTile(
+                    title: "Windows",
+                    systemImage: "window.vertical.open",
+                    detail: s.windowsOpen == true ? "Vent 10%" : nil,
+                    active: s.windowsOpen == true,
+                    busy: model.pending.contains(.windows),
+                    action: model.toggleWindows
+                )
+                ControlTile(
+                    title: "A/C",
+                    systemImage: "snowflake",
+                    detail: s.acOn == true ? "On · 21°" : nil,
+                    active: s.acOn == true,
+                    busy: model.pending.contains(.ac),
+                    action: model.toggleAC
+                )
+                ControlTile(
+                    title: "Honk",
+                    systemImage: "speaker.wave.3.fill",
+                    detail: model.pending.contains(.honk) ? "Horn & lights…" : nil,
+                    active: model.pending.contains(.honk),
+                    action: model.honk
+                )
+            }
+
+            TyreCard(tyres: s.tyresBar, odometerKm: s.odometerKm)
         }
-
-        TyreCard(tyres: s.tyresBar, odometerKm: s.odometerKm)
+        .opacity(dim)
     }
 
+    /// Last-known information is faded until the server confirms it.
+    private var dim: Double { model.stale ? 0.45 : 1 }
+
+    @ViewBuilder
     private func statusPill(_ s: CarStatus) -> some View {
+        if model.isRefreshing && model.stale {
+            chip {
+                ProgressView().controlSize(.mini).tint(Theme.text)
+                Text("Reading your car…")
+                    .font(.system(size: 12))
+                    .foregroundStyle(Color(hex: 0xC9D1D9))
+            }
+            .unredacted()
+        } else {
+            lockPill(s)
+        }
+    }
+
+    private func lockPill(_ s: CarStatus) -> some View {
         var open: [String] = []
         if s.locked == false { open.append("Unlocked") }
         if s.trunkOpen == true { open.append("Trunk open") }
@@ -137,17 +159,21 @@ struct HomeView: View {
         let text = secure ? "Locked" : (open.isEmpty ? "Lock state unknown" : open.joined(separator: " · "))
         let time = s.updatedAt.map { " · " + $0.formatted(date: .omitted, time: .shortened) } ?? ""
 
-        return HStack(spacing: 6) {
+        return chip {
             Circle().fill(secure ? Theme.accent : Theme.warning).frame(width: 8, height: 8)
             Text(text + time)
                 .font(.system(size: 12))
                 .foregroundStyle(Color(hex: 0xC9D1D9))
                 .lineLimit(2)
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 6)
-        .background(Capsule().fill(Theme.card))
-        .overlay(Capsule().strokeBorder(Theme.cardBorder))
+    }
+
+    private func chip<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
+        HStack(spacing: 6, content: content)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(Capsule().fill(Theme.card))
+            .overlay(Capsule().strokeBorder(Theme.cardBorder))
     }
 
     @ViewBuilder
@@ -159,9 +185,9 @@ struct HomeView: View {
                 Spacer(minLength: 0)
                 Button {
                     model.dismissError()
-                    if model.status == nil { Task { await model.load() } }
+                    if model.stale { Task { await model.load() } }
                 } label: {
-                    Text(model.status == nil ? "Retry" : "OK").font(.system(size: 14, weight: .semibold))
+                    Text(model.stale ? "Retry" : "OK").font(.system(size: 14, weight: .semibold))
                 }
                 .tint(Theme.accent)
             }
@@ -182,7 +208,7 @@ struct HomeView: View {
     }
 
     private var headline: String {
-        guard let s = model.status else { return "Connecting…" }
+        guard let s = model.status, !model.stale else { return "Connecting…" }
         if s.acOn == true { return "A/C on" }
         if s.charging == true { return "Charging" }
         return "Parked"
