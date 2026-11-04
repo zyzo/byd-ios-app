@@ -4,6 +4,10 @@
 <dict>
 	<key>AppGroup</key>
 	<string>group.$(APP_BUNDLE_ID)</string>
+	<key>BGTaskSchedulerPermittedIdentifiers</key>
+	<array>
+		<string>$(APP_BUNDLE_ID).trips.refresh</string>
+	</array>
 	<key>NSAppTransportSecurity</key>
 	<dict>
 		<key>NSAllowsLocalNetworking</key>
@@ -24,6 +28,7 @@
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>bluetooth-central</string>
+		<string>fetch</string>
 	</array>
 </dict>
 </plist>
