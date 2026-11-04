@@ -18,6 +18,10 @@ struct CarCommandIntent: AppIntent {
 
     func perform() async throws -> some IntentResult {
         guard let command = CarCommand(rawValue: command) else { return .result() }
+        // Redraw the widget now with this button loading; WidgetKit reloads again when we return.
+        RecentCommands.pending = command
+        WidgetCenter.shared.reloadTimelines(ofKind: CarWidget.kind)
+        defer { RecentCommands.pending = nil }
         let confirmed = try await CarAPI().run(command)
         if confirmed {
             RecentCommands.record(command)

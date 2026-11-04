@@ -4,8 +4,10 @@ import WidgetKit
 /// Full-width (medium) Home Screen widget: battery, range, lock state and four
 /// buttons that send commands without opening the app.
 struct CarWidget: Widget {
+    static let kind = "CarWidget"
+
     var body: some WidgetConfiguration {
-        StaticConfiguration(kind: "CarWidget", provider: CarProvider()) { entry in
+        StaticConfiguration(kind: Self.kind, provider: CarProvider()) { entry in
             CarWidgetView(entry: entry)
                 .containerBackground(Theme.card, for: .widget)
         }
@@ -84,7 +86,6 @@ struct CarWidgetView: View {
                         .foregroundStyle(Theme.muted)
                 }
             }
-            .invalidatableContent()
 
             Spacer(minLength: 8)
 
@@ -104,21 +105,25 @@ struct CarWidgetView: View {
                 commandButton(locked ? "Locked" : "Lock",
                               systemImage: locked ? "lock.fill" : "lock.open.fill",
                               active: locked && lockKnown,
-                              intent: CarCommandIntent(locked ? .unlock : .lock))
+                              control: .lock,
+                              command: locked ? .unlock : .lock)
                 commandButton("Trunk",
                               systemImage: "car.side.rear.open",
                               active: s.trunkOpen ?? false,
-                              intent: CarCommandIntent(s.trunkOpen ?? false ? .trunkClose : .trunkOpen))
+                              control: .trunk,
+                              command: s.trunkOpen ?? false ? .trunkClose : .trunkOpen)
                 commandButton(s.acOn ?? false ? "A/C on" : "A/C",
                               systemImage: "snowflake",
                               active: s.acOn ?? false,
-                              intent: CarCommandIntent(s.acOn ?? false ? .acStop : .acStart))
+                              control: .ac,
+                              command: s.acOn ?? false ? .acStop : .acStart)
                 commandButton("Honk",
                               systemImage: "speaker.wave.3.fill",
                               active: false,
-                              intent: CarCommandIntent(.honk))
+                              control: .honk,
+                              command: .honk)
             }
-            .disabled(entry.offline)
+            .disabled(entry.offline || entry.pending != nil)
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 14)
@@ -160,27 +165,37 @@ struct CarWidgetView: View {
         return parts.joined(separator: " · ")
     }
 
-    private func commandButton(_ title: String, systemImage: String, active: Bool, intent: CarCommandIntent) -> some View {
-        Button(intent: intent) {
+    /// One key. While `entry.pending` is this control's command the key shows a spinner;
+    /// while another one is pending it is dimmed (the row above disables all of them).
+    private func commandButton(_ title: String, systemImage: String, active: Bool, control: Control, command: CarCommand) -> some View {
+        let loading = entry.pending?.control == control
+        let othersBusy = entry.pending != nil && !loading
+        return Button(intent: CarCommandIntent(command)) {
             HStack(spacing: 6) {
-                Image(systemName: systemImage)
-                    .font(.system(size: 14, weight: .semibold))
-                Text(title)
+                if loading {
+                    ProgressView()
+                        .controlSize(.small)
+                        .tint(Theme.accent)
+                } else {
+                    Image(systemName: systemImage)
+                        .font(.system(size: 14, weight: .semibold))
+                }
+                Text(loading ? "Sending" : title)
                     .font(.system(size: 12, weight: .semibold))
                     .lineLimit(1)
                     .minimumScaleFactor(0.8)
             }
-            .invalidatableContent()
             .frame(maxWidth: .infinity)
             .frame(height: 44)
         }
-        .buttonStyle(WidgetKeyStyle(active: active))
+        .buttonStyle(WidgetKeyStyle(active: active || loading, dimmed: othersBusy))
     }
 }
 
 /// Flat version of the app's raised key: widgets can't draw shadows outside their tiles.
 private struct WidgetKeyStyle: ButtonStyle {
     var active: Bool
+    var dimmed = false
 
     func makeBody(configuration: Configuration) -> some View {
         let shape = RoundedRectangle(cornerRadius: 14, style: .continuous)
@@ -188,7 +203,20 @@ private struct WidgetKeyStyle: ButtonStyle {
             .foregroundStyle(active ? Theme.accent : Theme.text)
             .background(shape.fill(active ? Theme.accent.opacity(0.15) : Theme.raised))
             .overlay(shape.strokeBorder(active ? Theme.accent : Theme.raisedBorder, lineWidth: 1))
-            .opacity(configuration.isPressed ? 0.6 : 1)
+            .opacity(dimmed ? 0.4 : (configuration.isPressed ? 0.6 : 1))
+    }
+}
+
+private extension CarCommand {
+    /// The key on the widget that sends this command.
+    var control: Control {
+        switch self {
+        case .lock, .unlock: .lock
+        case .trunkOpen, .trunkClose: .trunk
+        case .windowsOpen, .windowsClose: .windows
+        case .acStart, .acStop: .ac
+        case .honk: .honk
+        }
     }
 }
 
@@ -204,4 +232,5 @@ private struct WidgetKeyStyle: ButtonStyle {
         return s
     }())
     CarEntry(date: .now, status: .sample, offline: true)
+    CarEntry(date: .now, status: .sample, pending: .unlock)
 }

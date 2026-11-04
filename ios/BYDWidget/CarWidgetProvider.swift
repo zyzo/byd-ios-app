@@ -5,6 +5,8 @@ struct CarEntry: TimelineEntry {
     var status: CarStatus?
     /// Set when the server couldn't be reached: the numbers shown are old.
     var offline = false
+    /// The command a widget button is sending right now, if any.
+    var pending: CarCommand?
 }
 
 /// Reads the car from the server for each timeline refresh. Commands sent from
@@ -34,6 +36,11 @@ struct CarProvider: TimelineProvider {
     }
 
     private func entry() async -> CarEntry {
+        // A button was just tapped: redraw from what we already know, right away,
+        // rather than making the spinner wait for the server.
+        if let pending = RecentCommands.pending, let status = RecentCommands.lastKnown {
+            return CarEntry(date: .now, status: status, pending: pending)
+        }
         do {
             var status = try await api.status()
             RecentCommands.overlay(on: &status)
@@ -55,8 +62,23 @@ enum RecentCommands {
     private static let commandKey = "widget.lastCommand"
     private static let commandDateKey = "widget.lastCommandDate"
     private static let statusKey = "widget.lastStatus"
+    private static let pendingKey = "widget.pendingCommand"
+    private static let pendingDateKey = "widget.pendingCommandDate"
     /// BYD's cached status can lag a command by a while.
     private static let overlayWindow: TimeInterval = 90
+
+    /// The command being sent right now. Forgotten after 100 s in case an intent is killed mid-way.
+    static var pending: CarCommand? {
+        get {
+            guard let raw = defaults.string(forKey: pendingKey), let command = CarCommand(rawValue: raw) else { return nil }
+            let since = Date(timeIntervalSinceReferenceDate: defaults.double(forKey: pendingDateKey))
+            return Date.now.timeIntervalSince(since) < 100 ? command : nil
+        }
+        set {
+            defaults.set(newValue?.rawValue, forKey: pendingKey)
+            defaults.set(Date.now.timeIntervalSinceReferenceDate, forKey: pendingDateKey)
+        }
+    }
 
     static func record(_ command: CarCommand) {
         defaults.set(command.rawValue, forKey: commandKey)
