@@ -71,7 +71,8 @@ struct CarAPI {
         do {
             (data, response) = try await URLSession.shared.data(for: request)
         } catch {
-            throw ServerError(message: "Can't reach the server at \(request.url?.host() ?? "?"). Is server.py running?")
+            let host = request.url?.host() ?? "?"
+            throw ServerError(message: "Can't reach the server at \(host): \(error.localizedDescription)")
         }
 
         let code = (response as? HTTPURLResponse)?.statusCode ?? 0
