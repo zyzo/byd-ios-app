@@ -78,6 +78,8 @@ npm run deploy
 
 The first deploy builds the container image and creates the Worker, the loop copies your credentials into its secrets, and the second deploy starts the container with them. It prints a fixed `https://byd-companion.….workers.dev` address: that's your `SERVER_URL`. A cron trigger pings the container every 5 minutes so it never goes to sleep.
 
+To ship a change, run `npm run deploy` again: it rebuilds the container image when `server.py` or `requirements.txt` changed and rolls out the Worker. The trip log's tables are created on first use, so no migration is needed.
+
 Logs: `npx wrangler tail` in `cloudflare/`. The server logs every push and poll with the age of the data.
 
 If **Trunk** or **Windows** fail with "Remote command … blocked … reason=function_no_missing" or "learn_info_missing", pyBYD is refusing to send them because BYD's feature list for your car doesn't advertise them. That data is often incomplete. Set `BYD_SKIP_COMMAND_GATE=1` (in `.env`, or in the `vars` of `cloudflare/wrangler.jsonc`) to send them anyway; the app then shows what BYD answers.
