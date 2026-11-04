@@ -1,4 +1,5 @@
 import { Container, getContainer } from "@cloudflare/containers";
+import { TripStore } from "./trips.js";
 
 // Settings the container gets from the Worker's vars and secrets (see wrangler.jsonc).
 const SETTINGS = [
@@ -17,6 +18,9 @@ const SETTINGS = [
 
 // One container runs server.py for a long time: it holds the BYD login and the MQTT
 // connection that feeds its cache. The cron trigger below keeps it from idling out.
+//
+// The same Durable Object also owns the trip log: its SQLite holds the snapshots pulled from
+// the container, the trips derived from them, the phones' events, settings and the car lease.
 export class BydServer extends Container {
   defaultPort = 8080;
   sleepAfter = "1h";
@@ -24,6 +28,31 @@ export class BydServer extends Container {
   constructor(ctx, env) {
     super(ctx, env);
     this.envVars = Object.fromEntries(SETTINGS.filter((k) => env[k] !== undefined).map((k) => [k, env[k]]));
+    this.trips = new TripStore(ctx.storage.sql);
+  }
+
+  async fetch(request) {
+    const url = new URL(request.url);
+    if (url.pathname === "/trips/sync" && request.method === "POST") {
+      return Response.json(await this.syncTrips());
+    }
+    const handled = await this.trips.handle(request);
+    return handled ?? super.fetch(request);
+  }
+
+  // Pulls new snapshots, prices and (hourly) energy figures from the container into SQLite.
+  async syncTrips() {
+    const fetchJson = async (path) => {
+      try {
+        const response = await super.fetch(new Request(`http://container${path}`));
+        if (!response.ok) return null;
+        return await response.json();
+      } catch (error) {
+        console.log("trip sync", path, String(error));
+        return null;
+      }
+    };
+    return this.trips.sync(fetchJson);
   }
 }
 
@@ -39,9 +68,13 @@ export default {
     return getContainer(env.BYD_SERVER).fetch(request);
   },
 
-  // Keeps the container awake (and starts it after a deploy or an eviction).
+  // Keeps the container awake (and starts it after a deploy or an eviction), then pulls the
+  // car's latest snapshots and prices into the trip log.
   async scheduled(_event, env) {
-    const response = await getContainer(env.BYD_SERVER).fetch(new Request("http://container/health"));
+    const container = getContainer(env.BYD_SERVER);
+    const response = await container.fetch(new Request("http://container/health"));
     console.log("keepalive", response.status, await response.text());
+    const sync = await container.fetch(new Request("http://container/trips/sync", { method: "POST" }));
+    console.log("trip sync", sync.status, await sync.text());
   },
 };

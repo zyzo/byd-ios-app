@@ -89,6 +89,29 @@ To run it on your Mac instead: `.venv/bin/uvicorn server:app --host 127.0.0.1 --
 
 `GET /status?refresh=true` asks the car for a new report and waits for one that is newer than what the cache had (up to about 25 seconds), so it never returns BYD's old cached snapshot. If the car doesn't answer, it returns the cache with `stale: true`. The server also asks the car for a report a few seconds after every command, and whenever nothing has arrived for `BYD_POLL_MINUTES` (default 15), so the cache never gets older than that while the car is reachable.
 
+### Trip log
+
+The Worker keeps a trip and energy log in the SQLite of the same Durable Object that hosts the container, so it survives container restarts and both phones read one log. Every 5 minutes the cron pulls the container's `/snapshots` (odometer, battery, fuel, power state at each change), `/prices` (the current petrol price and the car's battery and tank sizes) and, once an hour, `/energy` (BYD's last-50 km figures), then:
+
+- turns each power-on → power-off pair with at least 1 km into a trip (`source: "car"`), and an odometer jump between two power-off reports into a `coarse` trip;
+- works out km, kWh (battery drop × capacity), litres (fuel drop × tank), the electric and petrol km (a learnt kWh/km rate splits mixed trips), flags such as `chargedDuringTrip`, `refuelledDuringTrip` and `tooShortToMeasure`, and the cost at the prices in force when the trip closed (a petrol override in settings wins; no cost until a price per kWh is set);
+- attaches the phones' departure and arrival events to the trip they overlap (within 15 minutes), which gives the trip its phone, exact times and locations;
+- calibrates the battery and tank sizes from `/energy` against the percentage drops over the same 50 km, adopting a measured value after three readings within 10 % unless you set one by hand.
+
+Routes the Worker answers itself (same bearer token; everything else still goes to `server.py`):
+
+| Route | What it does |
+| --- | --- |
+| `GET /trips?since=&limit=` | Trips newest first, the open trip, settings, cached prices and `serverTime`. With `since`, soft-deleted trips are included (with `deletedAt`) so clients can drop them. |
+| `DELETE /trips/:id` | Soft-deletes a trip. |
+| `POST /trips/events` | `{"phoneId","phoneName","events":[{"kind":"departure"\|"arrival","at","lat","lon"}]}`; stores them, attaches what it can and answers `{"attached":n}`. Events with no trip yet are kept and attached at a later pull. |
+| `GET` / `PUT /settings` | `priceKwh`, `petrolOverrideVndPerLitre`, `batteryKwh`, `tankLitres`, `batterySource`, `tankSource` (`model`, `measured` or `manual`), `notifyOnTrip`. `PUT` merges; editing a capacity by hand marks it `manual`. |
+| `GET /phones` | The phones seen and the current leader. |
+| `POST /lease` | `{"phoneId","phoneName","kind":"car","ttlSeconds":120}` → `{"granted":bool,"leader":{...}}`. |
+| `POST /trips/sync` | What the cron runs: pull snapshots and prices now. Handy after `wrangler dev`. |
+
+**Two phones in the car.** The car holds one authenticated Bluetooth session at a time, so the phone that owns it is the leader and the only one that auto-unlocks, auto-locks and posts departure and arrival events. The lease only records that: the leader posts `POST /lease` when its link is ready and renews it on each signal tick; the Worker grants the lease to the first phone or the current holder and refuses other phones while it is live, so the other phone can show "Hieu's iPhone is driving" and stay quiet. With no internet the Bluetooth rule still decides on its own.
+
 ## 2. Build the app
 
 ```bash
