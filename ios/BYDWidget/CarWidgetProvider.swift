@@ -5,8 +5,9 @@ struct CarEntry: TimelineEntry {
     var status: CarStatus?
     /// Set when the server couldn't be reached: the numbers shown are old.
     var offline = false
-    /// The command a widget button is sending right now, if any.
+    /// The command a widget button is sending right now, if any, and when it was tapped.
     var pending: CarCommand?
+    var pendingSince = Date.now
     /// The app is connected to the car over Bluetooth: its keys open the app to send that way.
     var bluetooth = false
 }
@@ -48,9 +49,9 @@ struct CarProvider: TimelineProvider {
         if let pending = RecentCommands.pending {
             if let task = InflightCommand.task {
                 // A key was just tapped: redraw from what we already know, right away,
-                // so the spinner doesn't wait for the server.
+                // so the loading ring doesn't wait for the server.
                 if let status = RecentCommands.lastKnown {
-                    return CarEntry(date: .now, status: status, pending: pending, bluetooth: bluetooth)
+                    return CarEntry(date: .now, status: status, pending: pending, pendingSince: RecentCommands.pendingSince, bluetooth: bluetooth)
                 }
                 await task.value
             } else {
@@ -119,6 +120,11 @@ enum RecentCommands {
             defaults.set(newValue?.rawValue, forKey: pendingKey)
             defaults.set(Date.now.timeIntervalSinceReferenceDate, forKey: pendingDateKey)
         }
+    }
+
+    /// When the pending command was tapped.
+    static var pendingSince: Date {
+        Date(timeIntervalSinceReferenceDate: defaults.double(forKey: pendingDateKey))
     }
 
     static func record(_ command: CarCommand) {

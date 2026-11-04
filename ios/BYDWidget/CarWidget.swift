@@ -165,7 +165,7 @@ struct CarWidgetView: View {
         return parts.joined(separator: " · ")
     }
 
-    /// One key. While `entry.pending` is this control's command the key shows a spinner;
+    /// One key. While `entry.pending` is this control's command the key shows a filling ring;
     /// while another one is pending it is dimmed (the row above disables all of them).
     /// While the app is connected to the car over Bluetooth, keys the Bluetooth key can
     /// send carry a Bluetooth badge and open the app to send that way instead of the cloud.
@@ -175,9 +175,14 @@ struct CarWidgetView: View {
         let bluetooth = entry.bluetooth && command.worksOverBluetooth
         let label = Group {
             if loading {
-                ProgressView()
-                    .controlSize(.regular)
+                // Widgets are static snapshots: only a date-driven progress view moves.
+                ProgressView(timerInterval: entry.pendingSince...entry.pendingSince.addingTimeInterval(12),
+                             countsDown: false,
+                             label: { EmptyView() },
+                             currentValueLabel: { EmptyView() })
+                    .progressViewStyle(.circular)
                     .tint(Theme.accent)
+                    .frame(width: 18, height: 18)
             } else {
                 Image(systemName: systemImage)
                     .font(.system(size: 19, weight: .semibold))
