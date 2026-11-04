@@ -56,7 +56,7 @@ enum DemoTrips {
     static let otherPhone = Phone(id: "demo-other-phone", name: "Hieu's iPhone", lastSeen: Date().addingTimeInterval(-3 * 3600))
 
     static let prices = Prices(
-        petrol: .init(product: "E10 RON 95-III", zone: "Vùng 1", vndPerLitre: 23_230, source: "Petrolimex via webgia", cycle: "2026-11-03",
+        petrol: .init(product: "E10 RON 95-III", zone: 1, vndPerLitre: 23_230, source: "Petrolimex via webgia", cycle: "2026-11-03",
                       fetchedAt: Calendar.current.date(bySettingHour: 22, minute: 0, second: 0, of: Date().addingTimeInterval(-86_400)), stale: false),
         electricityHint: .init(tariffFrom: "2026-11-01", tiersVndPerKwh: [1_984, 2_050, 2_380, 2_998, 3_350, 3_460]),
         capacityHint: .init(batteryKwh: 18.3, tankLitres: 60, model: "Sealion 6 DM-i")

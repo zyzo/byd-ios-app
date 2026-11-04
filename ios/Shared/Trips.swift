@@ -121,7 +121,8 @@ struct EnergySettings: Codable, Equatable {
 struct Prices: Codable, Equatable {
     struct Petrol: Codable, Equatable {
         var product: String?
-        var zone: String?
+        /// Petrolimex price zone, 1 or 2 (the server sends a number).
+        var zone: Int?
         var vndPerLitre: Double
         var source: String?
         /// The state's price cycle this came from, e.g. "2026-11-03".
