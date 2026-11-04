@@ -20,13 +20,21 @@ final class AppServices {
     static let shared = AppServices()
 
     let ble: BleCarLink
+    let trips: TripStore
     let autoUnlock: AutoUnlock
     let autoLock: AutoLock
+    let tripLogger: TripLogger
 
     private init() {
-        ble = BleCarLink()
-        autoUnlock = AutoUnlock(link: ble)
-        autoLock = AutoLock(link: ble, api: CarAPI(), cachedStatus: StatusCache.load)
+        let ble = BleCarLink()
+        let trips = TripStore()
+        // Neither walk-up/walk-away feature acts while another phone is driving the car.
+        let autoUnlock = AutoUnlock(link: ble, otherPhoneLeads: { trips.otherPhoneLeads })
+        self.ble = ble
+        self.trips = trips
+        self.autoUnlock = autoUnlock
+        autoLock = AutoLock(link: ble, api: CarAPI(), cachedStatus: StatusCache.load, otherPhoneLeads: { trips.otherPhoneLeads })
+        tripLogger = TripLogger(link: ble, store: trips, carLocation: { autoUnlock.carLocation })
     }
 }
 

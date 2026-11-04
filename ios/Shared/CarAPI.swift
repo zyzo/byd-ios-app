@@ -40,6 +40,75 @@ struct CarAPI {
         return result.success
     }
 
+    // Trip log (see README, "Trip log"). The Worker answers these itself.
+
+    func trips(since: Date? = nil) async throws -> TripsResponse {
+        if AppConfig.demo { return await DemoTrips.response() }
+        var components = URLComponents(url: try endpoint("trips"), resolvingAgainstBaseURL: false)!
+        if let since {
+            components.queryItems = [URLQueryItem(name: "since", value: Self.iso.string(from: since))]
+        }
+        return try await send(URLRequest(url: components.url!))
+    }
+
+    func deleteTrip(_ id: String) async throws {
+        if AppConfig.demo { await DemoTrips.delete(id); return }
+        var request = URLRequest(url: try endpoint("trips/\(id)"))
+        request.httpMethod = "DELETE"
+        let _: Empty = try await send(request)
+    }
+
+    func postEvents(_ events: [PhoneEvent]) async throws {
+        if AppConfig.demo { return }
+        let body = PhoneEventsBody(phoneId: PhoneIdentity.id, phoneName: PhoneIdentity.name, events: events)
+        let _: Empty = try await send(try post("trips/events", body))
+    }
+
+    func settings() async throws -> EnergySettings {
+        if AppConfig.demo { return await DemoTrips.settings }
+        return try await send(URLRequest(url: try endpoint("settings")))
+    }
+
+    func updateSettings(_ settings: EnergySettings) async throws -> EnergySettings {
+        if AppConfig.demo { await DemoTrips.update(settings); return settings }
+        var request = try post("settings", settings)
+        request.httpMethod = "PUT"
+        return try await send(request)
+    }
+
+    func prices() async throws -> Prices {
+        if AppConfig.demo { return await DemoTrips.prices }
+        return try await send(URLRequest(url: try endpoint("prices")))
+    }
+
+    func phones() async throws -> PhonesResponse {
+        if AppConfig.demo { return await DemoTrips.phones() }
+        return try await send(URLRequest(url: try endpoint("phones")))
+    }
+
+    func lease() async throws -> LeaseResponse {
+        if AppConfig.demo { return LeaseResponse(granted: true, leader: Leader(phoneId: PhoneIdentity.id, name: PhoneIdentity.name, until: Date().addingTimeInterval(120))) }
+        return try await send(try post("lease", LeaseRequest(phoneId: PhoneIdentity.id, phoneName: PhoneIdentity.name)))
+    }
+
+    private static let iso = ISO8601DateFormatter()
+
+    private func post<Body: Encodable>(_ path: String, _ body: Body) throws -> URLRequest {
+        var request = URLRequest(url: try endpoint(path))
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        request.httpBody = try encoder.encode(body)
+        return request
+    }
+
+    /// For routes whose answer doesn't matter; the server may return nothing at all.
+    private struct Empty: Decodable {
+        init() {}
+        init(from decoder: Decoder) throws {}
+    }
+
     private struct ClimateBody: Encodable {
         let temperature: Double
         let minutes: Int
@@ -80,6 +149,7 @@ struct CarAPI {
             throw ServerError(message: detail ?? "Server error \(code)")
         }
 
+        if T.self == Empty.self { return Empty() as! T }
         return try CarStatus.decoder.decode(T.self, from: data)
     }
 }

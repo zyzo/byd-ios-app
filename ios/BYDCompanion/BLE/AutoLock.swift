@@ -49,6 +49,8 @@ final class AutoLock {
     private let api: CarAPI
     /// Fallback when the server doesn't answer in time.
     private let cachedStatus: () -> CarStatus?
+    /// Another phone is driving the car (it holds the server's lease): don't watch for a walk-away.
+    private let otherPhoneLeads: () -> Bool
     private let defaults = UserDefaults.standard
     private var smoothed: Double?
     private var readings = 0
@@ -56,10 +58,11 @@ final class AutoLock {
     private var timer: Timer?
     private var lockPendingUntil: Date?
 
-    init(link: BleCarLink, api: CarAPI, cachedStatus: @escaping () -> CarStatus?) {
+    init(link: BleCarLink, api: CarAPI, cachedStatus: @escaping () -> CarStatus?, otherPhoneLeads: @escaping () -> Bool = { false }) {
         self.link = link
         self.api = api
         self.cachedStatus = cachedStatus
+        self.otherPhoneLeads = otherPhoneLeads
         isOn = defaults.bool(forKey: Keys.wanted)
         let saved = defaults.integer(forKey: Keys.distance)
         distance = AutoUnlock.distances.contains(saved) ? saved : Self.defaultDistance
@@ -118,6 +121,11 @@ final class AutoLock {
 
     private func sessionStarted() {
         guard isOn else { return }
+        guard !otherPhoneLeads() else {
+            phase = .idle
+            link.note("Auto-lock: another phone is driving the car; not watching")
+            return
+        }
         resetSignal()
         if let until = lockPendingUntil, Date() < until {
             phase = .awaitingReconnect(until: until)

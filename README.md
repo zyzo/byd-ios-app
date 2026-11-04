@@ -15,6 +15,14 @@ An unofficial iPhone app for BYD cars: see battery, range, locks, windows and ty
 </p>
 
 <p align="center">
+  <img src="docs/screenshots/trips-card.png" width="250" alt="Home screen with the Trips card: 76 km this month, 8.6 kWh and 1.8 L, 74kđ">
+  &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+  <img src="docs/screenshots/trips-sheet.png" width="250" alt="Trips sheet: a week of kilometres per day, electric over petrol, and the week's trips by day">
+  &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+  <img src="docs/screenshots/trips-detail.png" width="250" alt="Trip detail: 38 km, 2.6 kWh, 1.8 L, 52kđ, what the car reported and the cost at that day's prices">
+</p>
+
+<p align="center">
   <img src="docs/screenshots/widget.png" width="420" alt="Home Screen widget: battery 31%, 143 km, locked, with lock, trunk, A/C and honk buttons">
 </p>
 
@@ -23,6 +31,7 @@ An unofficial iPhone app for BYD cars: see battery, range, locks, windows and ty
 - **No Face ID check every time.** Open the app and tap; it doesn't ask you to verify yourself before each command.
 - **Trunk lock and unlock** from the phone.
 - **Auto-unlock over Bluetooth.** Walk up to the car and it unlocks, even with the app closed. See [Auto-unlock](#4-auto-unlock-optional).
+- **A trip and energy log.** Every drive with its distance, kWh, litres, electric share and cost per km, from the car's own reports. See [Trip log](#6-trip-log).
 - **Works without internet near the car.** Lock, unlock, trunk and honk go straight over Bluetooth, so they still work in an underground car park with no signal.
 - **Faster near the car.** A Bluetooth command takes about a second, instead of several through BYD's cloud.
 
@@ -114,7 +123,7 @@ The default icon is `ios/BYDCompanion/Assets.xcassets/AppIcon.appiconset/AppIcon
 1. Create `ios/BYDCompanion/Local.xcassets/MyIcon.appiconset/` (gitignored). Put a 1024×1024 PNG with no transparency in it, plus a `Contents.json` like the one next to the default icon.
 2. Set `APP_ICON_NAME = MyIcon` in `ios/Config.local.xcconfig`.
 
-The accent colour and other colours are in `ios/BYDCompanion/Theme.swift`.
+The accent colour and other colours are in `ios/Shared/Theme.swift`.
 
 ## 3. Bluetooth key (optional)
 
@@ -149,6 +158,17 @@ In the Bluetooth sheet, turn on **Lock as I walk away**. It needs no location ac
 - No auto-lock within 60 seconds of any Bluetooth command from the app or widget, so an unlock to grab something isn't undone straight away.
 
 It locks only when the phone that holds the key walks away. If you leave the phone in the car, nothing happens. Loading the trunk or sitting inside keeps the signal strong, so it doesn't lock. Like auto-unlock, it can't run after you force-quit the app. In demo mode (`-demo YES`), long-press **Signal now** in the Bluetooth sheet to step the pretend signal down and watch it work.
+
+## 6. Trip log
+
+The home screen's **Trips** card shows this month's distance, energy and cost; tap it for the log. Nothing to set up: the server derives trips from the car's own reports (a power-on to power-off pair with the odometer moving), so drives are logged even when no phone is in the car.
+
+- **What's logged.** For each trip: the time, odometer, battery and fuel percentages at departure and arrival, from which the app shows kilometres, kWh, litres, the electric share and, when prices are known, the cost and cost per km. Each trip keeps the prices of its day, so old trips never change. Trips too short for the car's percentages to move show no energy or cost.
+- **With the phone.** When the phone connects to the car over Bluetooth it tells the server it left, and when the link drops, that it arrived, with the car's location when known. The server attaches that to the trip: exact times and which phone drove. Events wait on the phone until it's online, and about ten minutes after a drive iOS lets the app fetch the finished trip in the background. Trips driven without any phone show a barred-phone glyph.
+- **Two phones.** Both read the same log. The phone connected to the car holds a short lease on it (renewed every 30 s) and is shown as driving; while another phone holds the lease, auto-unlock and auto-lock on this one stay quiet, so a passenger's phone never unlocks or locks the car. Each phone has a name, the device's by default, shown on the trips it drove.
+- **Settings** (the gear in the Trips sheet): your electricity price per kWh; the petrol price, fetched by the server from public Vietnamese sources (E10 RON 95-III, zone 1) with an override; the battery and tank sizes, seeded from the car model and editable; this phone's name; and a quiet notification when a trip is logged.
+
+All amounts are in thousand dong (`758kđ`, `1.8kđ/km`). In demo mode (`-demo YES`), **Simulate a trip** at the bottom of the trip settings drives the pretend car and logs the result.
 
 ## Regions and tested cars
 
