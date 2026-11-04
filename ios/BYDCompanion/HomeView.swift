@@ -38,8 +38,6 @@ struct HomeView: View {
         }
     }
 
-    // MARK: Sections
-
     private var header: some View {
         HStack(alignment: .center) {
             VStack(alignment: .leading, spacing: 4) {
@@ -201,8 +199,6 @@ struct HomeView: View {
             .padding(.bottom, 8)
         }
     }
-
-    // MARK: Text
 
     private var carName: String {
         let name = model.status?.model ?? "BYD"
