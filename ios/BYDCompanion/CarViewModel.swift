@@ -1,5 +1,6 @@
 import Observation
 import SwiftUI
+import WidgetKit
 
 @MainActor
 @Observable
@@ -31,6 +32,7 @@ final class CarViewModel {
         do {
             status = try await api.status(refresh: refresh)
             errorMessage = nil
+            WidgetCenter.shared.reloadAllTimelines()
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -82,6 +84,7 @@ final class CarViewModel {
                     expected(&updated)
                     status = updated
                 }
+                WidgetCenter.shared.reloadAllTimelines()
                 UINotificationFeedbackGenerator().notificationOccurred(.success)
                 if control == .honk {
                     // Keep the tile lit while the horn sounds.

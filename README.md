@@ -22,6 +22,12 @@ An unofficial iPhone app for BYD cars: see battery, range, locks, windows and ty
 - **Works without internet near the car.** Lock, unlock, trunk and honk go straight over Bluetooth, so they still work in an underground car park with no signal.
 - **Faster near the car.** A Bluetooth command takes about a second, instead of several through BYD's cloud.
 
+## Home Screen widget
+
+A full-width widget shows battery, range and the lock state, with **Lock**, **Trunk**, **A/C** and **Honk** buttons that work without opening the app. Add it from the widget gallery (long-press the Home Screen, tap **+**, pick the app).
+
+Widget buttons always go through the server, since an extension can't use the car's Bluetooth key. The widget re-reads the car every 15 minutes, right after a command, and whenever the app loads or sends one. If the server can't be reached it dims the last known values and disables the buttons.
+
 ## How it works
 
 ```
@@ -30,7 +36,7 @@ iPhone app ──HTTPS──▶ server.py (on Vercel) ──▶ BYD cloud ──
 ```
 
 - **`server.py`**: a small FastAPI backend built on [pyBYD](https://github.com/jkaberg/pyBYD). It holds your BYD login, so the app never sees your password. Every request needs a shared token.
-- **The iOS app** (`ios/`): SwiftUI, iOS 17+. It talks to the server, and to the car directly over Bluetooth once you've provisioned a Bluetooth key.
+- **The iOS app** (`ios/`): SwiftUI, iOS 17+. It talks to the server, and to the car directly over Bluetooth once you've provisioned a Bluetooth key. `ios/BYDWidget/` is the Home Screen widget; `ios/Shared/` holds the models and server client both targets use.
 - **`provision_ble_key.py`**: gets a Bluetooth key from BYD by pairing a "watch" through a QR code you scan in the official BYD app. Ported from [BydBleAutoLock](https://github.com/PoorGrammerA/BydBleAutoLock).
 
 ## Requirements

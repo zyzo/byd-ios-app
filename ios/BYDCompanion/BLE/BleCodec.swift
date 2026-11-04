@@ -203,3 +203,16 @@ struct BleFrameAssembler {
         return payloads
     }
 }
+
+extension CarCommand {
+    /// The direct-Bluetooth equivalent, for the commands the dkey protocol supports.
+    var bleControl: BleCodec.Control? {
+        switch self {
+        case .lock: .lock
+        case .unlock: .unlock
+        case .trunkOpen: .trunkOpen
+        case .honk: .lightsAndHorn
+        default: nil
+        }
+    }
+}

@@ -1,15 +1,6 @@
 import Foundation
 import Security
 
-/// The car's Bluetooth key (from provision_ble_key.py). Stored only in the iOS Keychain.
-struct BleKey: Codable, Equatable {
-    var vin: String
-    var macAddress: String?
-    var dkey: String
-    var keyNumber: Int
-    var keyValidTo: Double?
-}
-
 enum BleKeyStore {
     private static let service = AppConfig.bundleID + ".blekey"
     private static let account = "default"
