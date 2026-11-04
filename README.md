@@ -29,11 +29,11 @@ An unofficial iPhone app for BYD cars: see battery, range, locks, windows and ty
 ## How it works
 
 ```
-iPhone app ──HTTPS──▶ server.py (on Vercel) ──▶ BYD cloud ──▶ car
-     └──────────── Bluetooth, when nearby (lock, unlock, trunk, honk) ────────▶ car
+iPhone app ──HTTPS──▶ server.py (Cloudflare container) ◀──MQTT pushes── BYD cloud ◀──▶ car
+     └──────────── Bluetooth, when nearby (lock, unlock, trunk, honk) ─────────────────▶ car
 ```
 
-- **`server.py`**: a small FastAPI backend built on [pyBYD](https://github.com/jkaberg/pyBYD). It holds your BYD login, so the app never sees your password. Every request needs a shared token.
+- **`server.py`**: a small FastAPI backend built on [pyBYD](https://github.com/jkaberg/pyBYD). It holds your BYD login, so the app never sees your password. Every request needs a shared token. It runs as one long-lived process: it logs in once, keeps pyBYD's MQTT connection to BYD open, and keeps a cache of the car's state that every push from the car updates. See [What the server returns](#what-the-server-returns).
 - **The iOS app** (`ios/`): SwiftUI, iOS 17+. It talks to the server, and to the car directly over Bluetooth once you've provisioned a Bluetooth key. `ios/BYDWidget/` is the Home Screen widget; `ios/Shared/` holds the models and server client both targets use.
 - **`provision_ble_key.py`**: gets a Bluetooth key from BYD by pairing a "watch" through a QR code you scan in the official BYD app. Ported from [BydBleAutoLock](https://github.com/PoorGrammerA/BydBleAutoLock).
 
@@ -52,21 +52,41 @@ cp .env.example .env    # then fill it in, including your region
 .venv/bin/python info.py   # optional: checks your login and prints what BYD returns
 ```
 
-The iPhone needs to reach the server, so deploy it to [Vercel](https://vercel.com) as a serverless function (the free Hobby plan works). Install the [Vercel CLI](https://vercel.com/docs/cli), then:
+The iPhone needs to reach the server, and the server should stay running so it can keep its BYD session and receive the car's pushes. The recommended host is [Cloudflare Containers](https://developers.cloudflare.com/containers/), which needs the Workers Paid plan (US$5/month, plus a few dollars a month for the small container). You need [Docker](https://docs.docker.com/get-docker/) running and Node.js.
 
 ```bash
-vercel --prod
-for v in BYD_USERNAME BYD_PASSWORD BYD_CONTROL_PIN APP_TOKEN BYD_BASE_URL BYD_COUNTRY_CODE BYD_LANGUAGE BYD_TIME_ZONE; do grep "^$v=" .env | cut -d= -f2- | tr -d '\n' | vercel env add "$v" production --force; done
-vercel --prod
+cd cloudflare
+npx wrangler login          # pick the account to deploy to
 ```
 
-The first deploy creates the project, the loop copies your `.env` into its environment variables, and the second deploy picks them up. It prints a fixed `https://….vercel.app` address: that's your `SERVER_URL`. On Vercel the server logs in to BYD on each cold start.
+Edit `cloudflare/wrangler.jsonc`: set `account_id` to yours (`npx wrangler whoami` lists it) and the `vars` to your region, the same values as in `.env`. Remove `BYD_SKIP_COMMAND_GATE` if you don't need it (see below). Then:
 
-If **Trunk** or **Windows** fail with "Remote command … blocked … reason=function_no_missing" or "learn_info_missing", pyBYD is refusing to send them because BYD's feature list for your car doesn't advertise them. That data is often incomplete. Set `BYD_SKIP_COMMAND_GATE=1` (in `.env`, or as a Vercel environment variable) to send them anyway; the app then shows what BYD answers.
+```bash
+npm install && npm run deploy
+for v in BYD_USERNAME BYD_PASSWORD BYD_CONTROL_PIN APP_TOKEN; do grep "^$v=" ../.env | cut -d= -f2- | tr -d '\n' | npx wrangler secret put "$v"; done
+npm run deploy
+```
 
-To run it on your Mac instead: `.venv/bin/uvicorn server:app --host 127.0.0.1 --port 8765`, and expose it to the iPhone however you like.
+The first deploy builds the container image and creates the Worker, the loop copies your credentials into its secrets, and the second deploy starts the container with them. It prints a fixed `https://byd-companion.….workers.dev` address: that's your `SERVER_URL`. A cron trigger pings the container every 5 minutes so it never goes to sleep.
 
-`cloudflare/` has an alternative Cloudflare Containers setup (needs the Workers Paid plan): set the region in `cloudflare/wrangler.jsonc`, add the secrets with `npx wrangler secret put`, then run `npm install && npm run deploy` in that folder.
+Logs: `npx wrangler tail` in `cloudflare/`. The server logs every push and poll with the age of the data.
+
+If **Trunk** or **Windows** fail with "Remote command … blocked … reason=function_no_missing" or "learn_info_missing", pyBYD is refusing to send them because BYD's feature list for your car doesn't advertise them. That data is often incomplete. Set `BYD_SKIP_COMMAND_GATE=1` (in `.env`, or in the `vars` of `cloudflare/wrangler.jsonc`) to send them anyway; the app then shows what BYD answers.
+
+To run it on your Mac instead: `.venv/bin/uvicorn server:app --host 127.0.0.1 --port 8765`, and expose it to the iPhone however you like. Run only one copy of the server per BYD account: BYD allows one push connection per login, and two servers keep kicking each other off it.
+
+### What the server returns
+
+`GET /status` answers from the cache at once, without talking to BYD. Besides the car's data it returns:
+
+| Field | Meaning |
+| --- | --- |
+| `updatedAt` | When the car produced the data (BYD's timestamp) |
+| `receivedAt` | When the server received it |
+| `source` | `push` (the car sent it over MQTT), `poll` (the server asked for it), or `projection` (a command just succeeded and its expected result is shown until the car confirms it) |
+| `stale` | `true` when a refresh was asked for and the car didn't answer with anything newer |
+
+`GET /status?refresh=true` asks the car for a new report and waits for one that is newer than what the cache had (up to about 25 seconds), so it never returns BYD's old cached snapshot. If the car doesn't answer, it returns the cache with `stale: true`. The server also asks the car for a report a few seconds after every command, and whenever nothing has arrived for `BYD_POLL_MINUTES` (default 15), so the cache never gets older than that while the car is reachable.
 
 ## 2. Build the app
 
@@ -81,7 +101,7 @@ Fill in `ios/Config.local.xcconfig` (it's gitignored):
 | `APP_DISPLAY_NAME` | The name under the icon |
 | `APP_BUNDLE_ID` | Any identifier unique to you, e.g. `com.yourname.byd-companion` |
 | `DEVELOPMENT_TEAM` | Your team ID, from Xcode › Settings › Accounts |
-| `SERVER_URL` | The server address. Write `//` as `/$()/`, e.g. `https:/$()/byd-app-abc.vercel.app` |
+| `SERVER_URL` | The server address. Write `//` as `/$()/`, e.g. `https:/$()/byd-companion.you.workers.dev` |
 | `SERVER_TOKEN` | The `APP_TOKEN` from your `.env` |
 
 Then open `ios/BYDCompanion.xcodeproj`, pick your iPhone and press Run.
@@ -102,8 +122,8 @@ With a Bluetooth key, lock, unlock, opening the trunk and honking go straight to
 1. Run `.venv/bin/python provision_ble_key.py`. It opens a QR code.
 2. In the official BYD app, scan it and tap Submit.
 3. The key is saved to `ble_key.json`. That file is a car key: it's gitignored, never share it.
-4. Give the server the key. On Vercel: `vercel env add BLE_KEY_JSON production < ble_key.json`, then `vercel --prod`. On your Mac, just restart `server.py`.
-5. In the app, tap the Bluetooth chip under the headline, then **Import key from Mac server**. The key is stored in the iPhone's Keychain. You can remove `BLE_KEY_JSON` from Vercel afterwards.
+4. Give the server the key. On Cloudflare: `npx wrangler secret put BLE_KEY_JSON < ../ble_key.json` in `cloudflare/`, then `npm run deploy`. On your Mac, just restart `server.py`.
+5. In the app, tap the Bluetooth chip under the headline, then **Import key from Mac server**. The key is stored in the iPhone's Keychain. You can delete the `BLE_KEY_JSON` secret afterwards.
 
 Commands that aren't confirmed by the car within 3 seconds are reported, not retried through the cloud, because the car may already have acted.
 

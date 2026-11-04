@@ -107,7 +107,7 @@ struct HomeView: View {
                 )
                 ControlTile(
                     title: "Windows",
-                    systemImage: "window.vertical.open",
+                    systemImage: "car.window.left",
                     detail: s.windowsOpen == true ? "Vent 10%" : nil,
                     active: s.windowsOpen == true,
                     busy: model.pending.contains(.windows),

@@ -2,6 +2,7 @@
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "byd-companion",
   "main": "src/index.js",
+  "account_id": "43dab155f8fd80d364a383cd589439a1",
   "compatibility_date": "2025-10-01",
   "workers_dev": true,
   "containers": [
@@ -9,20 +10,24 @@
       "class_name": "BydServer",
       "image": "../Dockerfile",
       "max_instances": 1,
-      "instance_type": "basic"
+      "instance_type": "lite"
     }
   ],
   "durable_objects": {
     "bindings": [{ "name": "BYD_SERVER", "class_name": "BydServer" }]
   },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["BydServer"] }],
-  // Non-secret region settings (same as in .env). Credentials are set with `wrangler secret put`.
-  // The account comes from `wrangler login` or CLOUDFLARE_ACCOUNT_ID.
+  // Every 5 minutes the Worker pings the container so it never goes to sleep: the server keeps
+  // its BYD login and MQTT connection, and the car's pushes keep the cache current.
+  "triggers": { "crons": ["*/5 * * * *"] },
+  // Non-secret settings (same as in .env). Credentials are set with `wrangler secret put`.
   "vars": {
-    "BYD_BASE_URL": "https://dilinkappoversea-eu.byd.auto",
-    "BYD_COUNTRY_CODE": "NL",
+    "BYD_BASE_URL": "https://dilinkappoversea-vn.byd.auto",
+    "BYD_COUNTRY_CODE": "VN",
     "BYD_LANGUAGE": "en",
-    "BYD_TIME_ZONE": "Europe/Amsterdam"
+    "BYD_TIME_ZONE": "Asia/Ho_Chi_Minh",
+    "BYD_SKIP_COMMAND_GATE": "1",
+    "BYD_POLL_MINUTES": "15"
   },
   "observability": { "enabled": true }
 }
