@@ -42,9 +42,11 @@ export class BydServer extends Container {
 
   // Pulls new snapshots, prices and (hourly) energy figures from the container into SQLite.
   async syncTrips() {
+    // The container checks the same bearer token as the public Worker, so the sync must send it.
+    const headers = { Authorization: `Bearer ${this.envVars.APP_TOKEN ?? ""}` };
     const fetchJson = async (path) => {
       try {
-        const response = await super.fetch(new Request(`http://container${path}`));
+        const response = await super.fetch(new Request(`http://container${path}`, { headers }));
         if (!response.ok) return null;
         return await response.json();
       } catch (error) {
