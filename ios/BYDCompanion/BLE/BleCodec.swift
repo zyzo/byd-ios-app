@@ -7,7 +7,7 @@ import Foundation
 // Verified there only on a Korean ATTO 3; other regions and models are unverified.
 
 enum BleCodec {
-    static let serviceUUID = "42594420-4155-544F-E0A9-E50E24DCCA9E"
+    static let serviceUUID = CarLinkState.serviceUUID
     static let writeUUID = "42590002-4155-544F-E0A9-E50E24DCCA9E"
     static let notifyUUID = "42590003-4155-544F-E0A9-E50E24DCCA9E"
 

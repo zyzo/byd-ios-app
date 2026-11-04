@@ -83,6 +83,25 @@ enum CarCommand: String {
         case .honk: "Honk"
         }
     }
+
+    /// The on-screen key that sends this command.
+    var control: Control {
+        switch self {
+        case .lock, .unlock: .lock
+        case .trunkOpen, .trunkClose: .trunk
+        case .windowsOpen, .windowsClose: .windows
+        case .acStart, .acStop: .ac
+        case .honk: .honk
+        }
+    }
+
+    /// Whether the car's Bluetooth key can send this (the dkey controls in BleCodec.swift).
+    var worksOverBluetooth: Bool {
+        switch self {
+        case .lock, .unlock, .trunkOpen, .honk: true
+        default: false
+        }
+    }
 }
 
 /// One control on the home screen; used to track which one is busy.

@@ -1,6 +1,7 @@
 import CoreBluetooth
 import Foundation
 import Observation
+import WidgetKit
 
 /// Direct Bluetooth link to the car using the dkey protocol (see BleCodec.swift).
 /// Finds the car, authenticates, and sends lock/unlock/trunk/horn commands
@@ -49,7 +50,9 @@ final class BleCarLink: NSObject {
         }
     }
 
-    private(set) var state: State = .noKey
+    private(set) var state: State = .noKey {
+        didSet { publishReady() }
+    }
     private(set) var hasKey = false
     /// Recent events, newest last, for troubleshooting.
     private(set) var log: [String] = []
@@ -98,6 +101,16 @@ final class BleCarLink: NSObject {
         hasKey = key != nil
         // The restore identifier lets iOS relaunch the app in the background for the car.
         central = CBCentralManager(delegate: self, queue: .main, options: [CBCentralManagerOptionRestoreIdentifierKey: Self.restoreID])
+        // A fresh process has no session yet, whatever the last one left behind.
+        publishReady()
+    }
+
+    /// Tells the widget whether a Bluetooth session is up, and redraws it when that changes.
+    private func publishReady() {
+        let ready = state == .ready
+        guard CarLinkState.ready != ready else { return }
+        CarLinkState.ready = ready
+        WidgetCenter.shared.reloadAllTimelines()
     }
 
     // MARK: Public

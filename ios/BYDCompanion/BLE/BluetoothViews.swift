@@ -31,26 +31,6 @@ struct BluetoothChip: View {
     }
 }
 
-/// The Bluetooth rune, since SF Symbols has no Bluetooth glyph.
-struct BluetoothRune: Shape {
-    func path(in r: CGRect) -> Path {
-        var p = Path()
-        let w = r.width, h = r.height
-        // Vertical stem.
-        p.move(to: CGPoint(x: r.minX + w * 0.5, y: r.minY))
-        p.addLine(to: CGPoint(x: r.minX + w * 0.5, y: r.maxY))
-        // Upper triangle.
-        p.move(to: CGPoint(x: r.minX, y: r.minY + h * 0.27))
-        p.addLine(to: CGPoint(x: r.maxX, y: r.minY + h * 0.73))
-        p.addLine(to: CGPoint(x: r.minX + w * 0.5, y: r.maxY))
-        // Lower triangle.
-        p.move(to: CGPoint(x: r.minX, y: r.minY + h * 0.73))
-        p.addLine(to: CGPoint(x: r.maxX, y: r.minY + h * 0.27))
-        p.addLine(to: CGPoint(x: r.minX + w * 0.5, y: r.minY))
-        return p
-    }
-}
-
 /// Details: state, recent events, and key management.
 struct BluetoothSheet: View {
     let link: BleCarLink

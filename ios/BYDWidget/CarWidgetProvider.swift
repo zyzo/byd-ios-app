@@ -7,6 +7,8 @@ struct CarEntry: TimelineEntry {
     var offline = false
     /// The command a widget button is sending right now, if any.
     var pending: CarCommand?
+    /// The app is connected to the car over Bluetooth: its keys open the app to send that way.
+    var bluetooth = false
 }
 
 /// Reads the car from the server for each timeline refresh. Commands sent from
@@ -42,12 +44,13 @@ struct CarProvider: TimelineProvider {
     }
 
     private func entry() async -> CarEntry {
+        let bluetooth = await Self.bluetoothReady()
         if let pending = RecentCommands.pending {
             if let task = InflightCommand.task {
                 // A key was just tapped: redraw from what we already know, right away,
                 // so the spinner doesn't wait for the server.
                 if let status = RecentCommands.lastKnown {
-                    return CarEntry(date: .now, status: status, pending: pending)
+                    return CarEntry(date: .now, status: status, pending: pending, bluetooth: bluetooth)
                 }
                 await task.value
             } else {
@@ -59,15 +62,21 @@ struct CarProvider: TimelineProvider {
         do {
             var status = try await api.status()
             RecentCommands.overlay(on: &status)
-            return CarEntry(date: .now, status: status)
+            return CarEntry(date: .now, status: status, bluetooth: bluetooth)
         } catch {
             var status = RecentCommands.lastKnown
             if var s = status {
                 RecentCommands.overlay(on: &s)
                 status = s
             }
-            return CarEntry(date: .now, status: status, offline: true)
+            return CarEntry(date: .now, status: status, offline: true, bluetooth: bluetooth)
         }
+    }
+
+    /// The app says its Bluetooth session is up, and iOS confirms the car is still connected.
+    static func bluetoothReady() async -> Bool {
+        guard CarLinkState.ready else { return false }
+        return await BleProbe.carConnected()
     }
 }
 

@@ -167,25 +167,43 @@ struct CarWidgetView: View {
 
     /// One key. While `entry.pending` is this control's command the key shows a spinner;
     /// while another one is pending it is dimmed (the row above disables all of them).
+    /// While the app is connected to the car over Bluetooth, keys the Bluetooth key can
+    /// send carry a Bluetooth badge and open the app to send that way instead of the cloud.
     private func commandButton(_ title: String, systemImage: String, active: Bool, control: Control, command: CarCommand) -> some View {
         let loading = entry.pending?.control == control
         let othersBusy = entry.pending != nil && !loading
-        return Button(intent: CarCommandIntent(command)) {
-            Group {
-                if loading {
-                    ProgressView()
-                        .controlSize(.regular)
-                        .tint(Theme.accent)
-                } else {
-                    Image(systemName: systemImage)
-                        .font(.system(size: 19, weight: .semibold))
-                }
+        let bluetooth = entry.bluetooth && command.worksOverBluetooth
+        let label = Group {
+            if loading {
+                ProgressView()
+                    .controlSize(.regular)
+                    .tint(Theme.accent)
+            } else {
+                Image(systemName: systemImage)
+                    .font(.system(size: 19, weight: .semibold))
             }
-            .frame(maxWidth: .infinity)
-            .frame(height: 44)
+        }
+        .frame(maxWidth: .infinity)
+        .frame(height: 44)
+        .overlay(alignment: .topTrailing) {
+            if bluetooth && !loading {
+                BluetoothRune()
+                    .stroke(Theme.accent, style: StrokeStyle(lineWidth: 1.4, lineCap: .round, lineJoin: .round))
+                    .frame(width: 6, height: 10)
+                    .padding(.top, 7)
+                    .padding(.trailing, 8)
+            }
+        }
+        return Group {
+            if bluetooth {
+                Button(intent: CarBluetoothCommandIntent(command)) { label }
+            } else {
+                Button(intent: CarCommandIntent(command)) { label }
+            }
         }
         .buttonStyle(WidgetKeyStyle(active: active || loading, dimmed: othersBusy))
         .accessibilityLabel(loading ? "Sending" : title)
+        .accessibilityHint(bluetooth ? "Opens the app and sends over Bluetooth" : "")
     }
 }
 
@@ -204,23 +222,11 @@ private struct WidgetKeyStyle: ButtonStyle {
     }
 }
 
-private extension CarCommand {
-    /// The key on the widget that sends this command.
-    var control: Control {
-        switch self {
-        case .lock, .unlock: .lock
-        case .trunkOpen, .trunkClose: .trunk
-        case .windowsOpen, .windowsClose: .windows
-        case .acStart, .acStop: .ac
-        case .honk: .honk
-        }
-    }
-}
-
 #Preview(as: .systemMedium) {
     CarWidget()
 } timeline: {
     CarEntry(date: .now, status: .sample)
+    CarEntry(date: .now, status: .sample, bluetooth: true)
     CarEntry(date: .now, status: {
         var s = CarStatus.sample
         s.locked = false

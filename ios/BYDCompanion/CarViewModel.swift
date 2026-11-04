@@ -71,6 +71,29 @@ final class CarViewModel {
         errorMessage = nil
     }
 
+    /// Runs the command a widget key handed to the app, if any. The widget only does that while
+    /// the car is reachable over Bluetooth, so wait a moment for the link if it isn't ready yet
+    /// (iOS may have just relaunched the app); failing that, `send` falls back to the cloud.
+    func runHandoff() {
+        guard let command = CarLinkState.takeHandoff() else { return }
+        Task {
+            if command.bleControl != nil, ble.hasKey {
+                ble.connect()
+                var waited = 0
+                while ble.state != .ready, waited < 20 {
+                    try? await Task.sleep(for: .milliseconds(200))
+                    waited += 1
+                }
+            }
+            run(command)
+        }
+    }
+
+    /// Sends any command, showing the expected result like the on-screen keys do.
+    func run(_ command: CarCommand) {
+        perform(command.control, command) { $0.apply(command) }
+    }
+
     /// Sends the command, then shows the expected result right away and
     /// re-reads the car a few seconds later to confirm it.
     private func perform(_ control: Control, _ command: CarCommand, expected: @escaping (inout CarStatus) -> Void) {

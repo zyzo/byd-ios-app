@@ -25,8 +25,11 @@ struct HomeView: View {
         .refreshable { await model.load(refresh: true) }
         .task { await model.load() }
         .safeAreaInset(edge: .bottom) { errorBanner }
-        .onChange(of: scenePhase) { _, phase in
-            if phase == .active { model.ble.connect() }
+        .onChange(of: scenePhase, initial: true) { _, phase in
+            if phase == .active {
+                model.ble.connect()
+                model.runHandoff()
+            }
         }
         .sheet(isPresented: $showingBluetooth) {
             BluetoothSheet(link: model.ble, autoUnlock: model.autoUnlock, importing: model.importingKey) {
