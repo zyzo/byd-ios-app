@@ -150,9 +150,5 @@ enum RecentCommands {
         return e
     }
 
-    private static var decoder: JSONDecoder {
-        let d = JSONDecoder()
-        d.dateDecodingStrategy = .iso8601
-        return d
-    }
+    private static var decoder: JSONDecoder { CarStatus.decoder }
 }

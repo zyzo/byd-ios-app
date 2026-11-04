@@ -85,6 +85,7 @@ To run it on your Mac instead: `.venv/bin/uvicorn server:app --host 127.0.0.1 --
 | `receivedAt` | When the server received it |
 | `source` | `push` (the car sent it over MQTT), `poll` (the server asked for it), or `projection` (a command just succeeded and its expected result is shown until the car confirms it) |
 | `stale` | `true` when a refresh was asked for and the car didn't answer with anything newer |
+| `powerOn`, `speedKmh`, `anyDoorOpen` | Whether the car is on, how fast it's going, and whether any door or the trunk is open; auto-lock checks these before locking |
 
 `GET /status?refresh=true` asks the car for a new report and waits for one that is newer than what the cache had (up to about 25 seconds), so it never returns BYD's old cached snapshot. If the car doesn't answer, it returns the cache with `stale: true`. The server also asks the car for a report a few seconds after every command, and whenever nothing has arrived for `BYD_POLL_MINUTES` (default 15), so the cache never gets older than that while the car is reachable.
 
@@ -136,6 +137,18 @@ In the Bluetooth sheet, turn on **Unlock as I walk up** and allow location **Alw
 - When you come back, the app reconnects and sends one Bluetooth unlock once the signal stays above the chosen distance (50 cm to 5 m) for 1.5 seconds. It never unlocks through the cloud, and a quiet notification tells you it happened.
 
 The distances are rough guesses from signal strength: walls, pockets and bags change them. The Bluetooth sheet shows the live signal to help you pick one.
+
+## 5. Auto-lock (optional)
+
+In the Bluetooth sheet, turn on **Lock as I walk away**. It needs no location access: it only watches the Bluetooth signal while the phone is connected to the car.
+
+- Once the signal has been stronger than the chosen distance (50 cm to 5 m, default 3 m) for a moment, the app knows you were at the car.
+- When the signal then stays weaker than that for 8 seconds, it sends one Bluetooth lock, never through BYD's cloud, and a quiet notification tells you whether the car confirmed it. One lock per visit: it won't lock again until you've been at the car again.
+- If the Bluetooth link drops before that, it locks when the link comes back within 2 minutes, if you're still beyond the chosen distance.
+- Before locking it asks the server for the car's latest report. If that report is less than 5 minutes old and says the car is on, moving, or has a door or the trunk open, it doesn't lock and tells you why. If the car is already locked it stays quiet. An old or unreachable report never blocks the lock.
+- No auto-lock within 60 seconds of any Bluetooth command from the app or widget, so an unlock to grab something isn't undone straight away.
+
+It locks only when the phone that holds the key walks away. If you leave the phone in the car, nothing happens. Loading the trunk or sitting inside keeps the signal strong, so it doesn't lock. Like auto-unlock, it can't run after you force-quit the app. In demo mode (`-demo YES`), long-press **Signal now** in the Bluetooth sheet to step the pretend signal down and watch it work.
 
 ## Regions and tested cars
 

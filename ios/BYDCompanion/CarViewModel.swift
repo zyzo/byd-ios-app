@@ -16,6 +16,7 @@ final class CarViewModel {
 
     let ble = AppServices.shared.ble
     let autoUnlock = AppServices.shared.autoUnlock
+    let autoLock = AppServices.shared.autoLock
     private let api = CarAPI()
 
     /// Fetches the Bluetooth key from the Mac server and stores it in the Keychain.
@@ -100,6 +101,7 @@ final class CarViewModel {
         guard !pending.contains(control) else { return }
         pending.insert(control)
         UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+        if control == .lock { autoLock.manualCommandSent() }
 
         Task {
             defer { pending.remove(control) }
@@ -157,9 +159,7 @@ enum StatusCache {
 
     static func load() -> CarStatus? {
         guard !AppConfig.demo, let data = UserDefaults.standard.data(forKey: key) else { return nil }
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
-        return try? decoder.decode(CarStatus.self, from: data)
+        return try? CarStatus.decoder.decode(CarStatus.self, from: data)
     }
 
     static func save(_ status: CarStatus?) {

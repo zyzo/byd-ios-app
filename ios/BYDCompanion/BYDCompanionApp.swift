@@ -21,10 +21,12 @@ final class AppServices {
 
     let ble: BleCarLink
     let autoUnlock: AutoUnlock
+    let autoLock: AutoLock
 
     private init() {
         ble = BleCarLink()
         autoUnlock = AutoUnlock(link: ble)
+        autoLock = AutoLock(link: ble, api: CarAPI(), cachedStatus: StatusCache.load)
     }
 }
 

@@ -32,7 +32,7 @@ struct HomeView: View {
             }
         }
         .sheet(isPresented: $showingBluetooth) {
-            BluetoothSheet(link: model.ble, autoUnlock: model.autoUnlock, importing: model.importingKey) {
+            BluetoothSheet(link: model.ble, autoUnlock: model.autoUnlock, autoLock: model.autoLock, importing: model.importingKey) {
                 Task { await model.importBleKey() }
             }
         }

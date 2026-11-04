@@ -366,6 +366,10 @@ def build_status(stale: bool = False) -> dict:
         "windowsOpen": any(w == WindowState.OPEN for w in windows if w is not None),
         "acOn": hvac.is_ac_on if hvac is not None else None,
         "charging": rt.is_charging,
+        # For the app's auto-lock: it won't lock a car that is on, moving, or has a door open.
+        "powerOn": rt.is_vehicle_on,
+        "speedKmh": rt.speed,
+        "anyDoorOpen": rt.is_any_door_open,
         "tyresBar": {
             "frontLeft": to_bar(rt.left_front_tire_pressure, unit),
             "frontRight": to_bar(rt.right_front_tire_pressure, unit),

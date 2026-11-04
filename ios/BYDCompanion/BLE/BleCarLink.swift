@@ -62,9 +62,12 @@ final class BleCarLink: NSObject {
     private(set) var readySince: Date?
 
     /// Called when the link becomes ready, when a ready link is lost, and on each signal reading.
-    var onReady: (() -> Void)?
-    var onLinkLost: (() -> Void)?
-    var onRSSI: ((Int) -> Void)?
+    /// Several features listen (auto-unlock, auto-lock), so each is a list; append to subscribe.
+    var onReady: [() -> Void] = []
+    var onLinkLost: [() -> Void] = []
+    var onRSSI: [(Int) -> Void] = []
+    /// When a control command was last sent, whoever sent it.
+    private(set) var lastCommandAt: Date?
 
     private var central: CBCentralManager!
     private var peripheral: CBPeripheral?
@@ -85,6 +88,8 @@ final class BleCarLink: NSObject {
     private static let notifyID = CBUUID(string: BleCodec.notifyUUID)
     private static let savedPeripheralKey = "ble.peripheral.id"
     private static let restoreID = "car-link"
+    /// Demo mode: the signal strength `readRSSI()` pretends to see (dBm).
+    var demoSignal = -58
 
     override init() {
         super.init()
@@ -163,7 +168,8 @@ final class BleCarLink: NSObject {
     func readRSSI() {
         guard state == .ready else { return }
         if AppConfig.demo {
-            rssi = Int.random(in: -60 ... -56)
+            rssi = demoSignal + Int.random(in: -2 ... 2)
+            onRSSI.forEach { $0(rssi!) }
             return
         }
         peripheral?.readRSSI()
@@ -171,6 +177,7 @@ final class BleCarLink: NSObject {
 
     /// Sends one control command and waits up to 3 s for the car's acknowledgement.
     func send(_ control: BleCodec.Control) async throws {
+        lastCommandAt = Date()
         if AppConfig.demo {
             note("→ control 0x\(String(format: "%02X", control.rawValue))")
             try? await Task.sleep(for: .milliseconds(300))
@@ -257,7 +264,7 @@ final class BleCarLink: NSObject {
             // Callers that keep looking set .searching again afterwards.
             state = .stopped
         }
-        if wasReady { onLinkLost?() }
+        if wasReady { onLinkLost.forEach { $0() } }
     }
 
     // MARK: Authentication
@@ -301,7 +308,7 @@ final class BleCarLink: NSObject {
                 state = .ready
                 readySince = Date()
                 note("Bluetooth ready")
-                onReady?()
+                onReady.forEach { $0() }
             } catch is CancellationError {
                 return
             } catch {
@@ -487,7 +494,7 @@ extension BleCarLink: CBPeripheralDelegate {
         MainActor.assumeIsolated {
             guard error == nil, state == .ready else { return }
             rssi = RSSI.intValue
-            onRSSI?(RSSI.intValue)
+            onRSSI.forEach { $0(RSSI.intValue) }
         }
     }
 

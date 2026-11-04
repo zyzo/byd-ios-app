@@ -35,6 +35,7 @@ struct BluetoothChip: View {
 struct BluetoothSheet: View {
     let link: BleCarLink
     @Bindable var autoUnlock: AutoUnlock
+    @Bindable var autoLock: AutoLock
     var importing: Bool
     let importKey: () -> Void
     @Environment(\.dismiss) private var dismiss
@@ -59,7 +60,10 @@ struct BluetoothSheet: View {
                 } footer: {
                     Text("With the key, lock, unlock, trunk and honk go straight to the car over Bluetooth when you're nearby. Everything else, and anything out of range, uses BYD's cloud.")
                 }
-                if link.hasKey { autoUnlockSection }
+                if link.hasKey {
+                    autoUnlockSection
+                    autoLockSection
+                }
                 Section("Recent events") {
                     if link.log.isEmpty {
                         Text("Nothing yet").foregroundStyle(.secondary)
@@ -133,9 +137,7 @@ struct BluetoothSheet: View {
                     .pickerStyle(.segmented)
                     Text("Approximate. Walls, pockets and bags weaken the signal, so start short and widen it if it unlocks too late.")
                         .font(.footnote).foregroundStyle(.secondary)
-                    if let rssi = link.rssi {
-                        Text("Signal now: \(rssi) dBm").font(.footnote.monospacedDigit()).foregroundStyle(.secondary)
-                    }
+                    signalNow
                 }
                 .padding(.vertical, 4)
                 HStack(spacing: 6) {
@@ -160,6 +162,68 @@ struct BluetoothSheet: View {
             Text("Auto-unlock")
         } footer: {
             Text("Unlocks only after you've been away from the car and come back, never while you're already nearby. Always over Bluetooth, never through BYD's cloud.")
+        }
+    }
+
+    /// Live signal strength. In demo mode a long press steps the pretend signal down, to try auto-lock without a car.
+    @ViewBuilder private var signalNow: some View {
+        if let rssi = link.rssi {
+            Text("Signal now: \(rssi) dBm")
+                .font(.footnote.monospacedDigit())
+                .foregroundStyle(.secondary)
+                .onLongPressGesture {
+                    guard AppConfig.demo else { return }
+                    link.demoSignal = link.demoSignal <= -88 ? -58 : link.demoSignal - 10
+                }
+        }
+    }
+
+    private var autoLockSection: some View {
+        Section {
+            HStack(spacing: 12) {
+                Image(systemName: "lock.fill")
+                    .font(.system(size: 17, weight: .semibold))
+                    .foregroundStyle(Theme.accent)
+                    .frame(width: 36, height: 36)
+                    .background(RoundedRectangle(cornerRadius: 10).fill(Theme.cardBorder))
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Lock as I walk away")
+                    Text(autoLock.isOn ? "On · beyond about \(AutoUnlock.label(autoLock.distance))" : "Off")
+                        .font(.footnote).foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 8)
+                Toggle("Lock as I walk away", isOn: Binding(
+                    get: { autoLock.isOn },
+                    set: { $0 ? autoLock.enable() : autoLock.disable() }
+                ))
+                .labelsHidden()
+                .tint(Theme.accent)
+            }
+
+            if autoLock.isOn {
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack {
+                        Text("Lock distance")
+                        Spacer()
+                        Text("≈ \(AutoUnlock.label(autoLock.distance))").fontWeight(.semibold).foregroundStyle(Theme.accent)
+                    }
+                    Picker("Lock distance", selection: $autoLock.distance) {
+                        ForEach(AutoUnlock.distances, id: \.self) { Text(AutoUnlock.label($0)).tag($0) }
+                    }
+                    .pickerStyle(.segmented)
+                    Text("Approximate. Start wide so a walk round the car or a stop at the trunk doesn't lock it, and narrow it if it locks too late.")
+                        .font(.footnote).foregroundStyle(.secondary)
+                    signalNow
+                    Text(autoLock.statusText)
+                        .font(.footnote.monospacedDigit())
+                        .foregroundStyle(Theme.accent)
+                }
+                .padding(.vertical, 4)
+            }
+        } header: {
+            Text("Auto-lock")
+        } footer: {
+            Text("Locks once the Bluetooth signal has stayed weaker than the chosen distance for a few seconds, only after you were at the car. Always over Bluetooth, never through BYD's cloud. It won't lock while the car is on or a door is open, and it does nothing if the phone stays in the car.")
         }
     }
 

@@ -14,8 +14,15 @@ struct CarStatus: Codable, Equatable {
     var windowsOpen: Bool?
     var acOn: Bool?
     var charging: Bool?
+    /// Ignition on, moving, or a door/trunk open. Auto-lock won't lock the car in any of these states.
+    var powerOn: Bool?
+    var speedKmh: Double?
+    var anyDoorOpen: Bool?
     var tyresBar: Tyres
+    /// When the car produced the data (BYD's timestamp).
     var updatedAt: Date?
+    /// When the server received it, if it says.
+    var receivedAt: Date?
 
     struct Tyres: Codable, Equatable {
         var frontLeft: Double?
@@ -53,10 +60,30 @@ struct CarStatus: Codable, Equatable {
         windowsOpen: false,
         acOn: false,
         charging: false,
+        powerOn: false,
+        speedKmh: 0,
+        anyDoorOpen: false,
         tyresBar: .init(frontLeft: 2.5, frontRight: 2.5, rearLeft: 2.4, rearRight: 2.5),
         // Matches the 9:41 status bar used for screenshots.
-        updatedAt: Calendar.current.date(bySettingHour: 9, minute: 40, second: 0, of: Date())
+        updatedAt: Calendar.current.date(bySettingHour: 9, minute: 40, second: 0, of: Date()),
+        receivedAt: Date()
     )
+
+    /// Decodes the server's JSON. Its timestamps are ISO 8601 with or without fractional seconds.
+    static var decoder: JSONDecoder {
+        let decoder = JSONDecoder()
+        let plain = ISO8601DateFormatter()
+        let fractional = ISO8601DateFormatter()
+        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        decoder.dateDecodingStrategy = .custom { decoder in
+            let text = try decoder.singleValueContainer().decode(String.self)
+            guard let date = plain.date(from: text) ?? fractional.date(from: text) else {
+                throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath, debugDescription: "Not an ISO 8601 date: \(text)"))
+            }
+            return date
+        }
+        return decoder
+    }
 }
 
 /// Command names accepted by `POST /command/{name}`.
