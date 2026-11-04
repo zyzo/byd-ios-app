@@ -117,8 +117,6 @@ final class BleCarLink: NSObject {
         WidgetCenter.shared.reloadAllTimelines()
     }
 
-    // MARK: Public
-
     func installKey(_ newKey: BleKey) throws {
         try BleKeyStore.save(newKey)
         key = newKey
@@ -204,8 +202,6 @@ final class BleCarLink: NSObject {
         guard reply[3] == 0x01 else { throw CommandError.rejected(reply[3]) }
     }
 
-    // MARK: Finding the car
-
     private func findCar() {
         if let saved = UserDefaults.standard.string(forKey: Self.savedPeripheralKey).flatMap(UUID.init),
            let known = central.retrievePeripherals(withIdentifiers: [saved]).first {
@@ -266,8 +262,6 @@ final class BleCarLink: NSObject {
         if wasReady { onLinkLost.forEach { $0() } }
     }
 
-    // MARK: Authentication
-
     private func authenticate() {
         guard let key else { return }
         state = .authenticating
@@ -324,8 +318,6 @@ final class BleCarLink: NSObject {
         init(_ message: String) { self.message = message }
     }
 
-    // MARK: I/O helpers
-
     private func write(_ data: Data) async throws {
         guard let peripheral, let writeChar else { throw CommandError.notReady }
         // The car rejects the wake frame when forced to write-without-response,
@@ -365,8 +357,6 @@ final class BleCarLink: NSObject {
         if log.count > 60 { log.removeFirst(log.count - 60) }
     }
 }
-
-// MARK: - CBCentralManagerDelegate
 
 extension BleCarLink: CBCentralManagerDelegate {
     nonisolated func centralManager(_ central: CBCentralManager, willRestoreState dict: [String: Any]) {
@@ -434,8 +424,6 @@ extension BleCarLink: CBCentralManagerDelegate {
         }
     }
 }
-
-// MARK: - CBPeripheralDelegate
 
 extension BleCarLink: CBPeripheralDelegate {
     nonisolated func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: Error?) {

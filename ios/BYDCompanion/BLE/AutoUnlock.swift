@@ -98,8 +98,6 @@ final class AutoUnlock: NSObject {
         updateRegion()
     }
 
-    // MARK: Switching on and off
-
     func enable() {
         if AppConfig.demo { wanted = true; return }
         wanted = true
@@ -145,8 +143,6 @@ final class AutoUnlock: NSObject {
         }
     }
 
-    // MARK: Where the car is
-
     private func updateRegion() {
         for region in manager.monitoredRegions where region.identifier == Self.regionID {
             manager.stopMonitoring(for: region)
@@ -171,8 +167,6 @@ final class AutoUnlock: NSObject {
         guard isOn else { return }
         manager.requestLocation()
     }
-
-    // MARK: Approaching the car
 
     private var isArmed: Bool {
         guard let armedAt else { return false }
@@ -255,8 +249,6 @@ enum CarNotifications {
         UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil))
     }
 }
-
-// MARK: - CLLocationManagerDelegate
 
 extension AutoUnlock: CLLocationManagerDelegate {
     nonisolated func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
