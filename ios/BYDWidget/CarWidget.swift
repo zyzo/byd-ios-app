@@ -35,7 +35,7 @@ struct CarWidgetView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             .padding(.horizontal, 16)
-            .padding(.vertical, 14)
+            .padding(.vertical, 18)
         }
     }
 
@@ -126,7 +126,7 @@ struct CarWidgetView: View {
             .disabled(entry.offline || entry.pending != nil)
         }
         .padding(.horizontal, 16)
-        .padding(.vertical, 14)
+        .padding(.vertical, 18)
     }
 
     @ViewBuilder
@@ -171,24 +171,21 @@ struct CarWidgetView: View {
         let loading = entry.pending?.control == control
         let othersBusy = entry.pending != nil && !loading
         return Button(intent: CarCommandIntent(command)) {
-            HStack(spacing: 6) {
+            Group {
                 if loading {
                     ProgressView()
-                        .controlSize(.small)
+                        .controlSize(.regular)
                         .tint(Theme.accent)
                 } else {
                     Image(systemName: systemImage)
-                        .font(.system(size: 14, weight: .semibold))
+                        .font(.system(size: 19, weight: .semibold))
                 }
-                Text(loading ? "Sending" : title)
-                    .font(.system(size: 12, weight: .semibold))
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.8)
             }
             .frame(maxWidth: .infinity)
             .frame(height: 44)
         }
         .buttonStyle(WidgetKeyStyle(active: active || loading, dimmed: othersBusy))
+        .accessibilityLabel(loading ? "Sending" : title)
     }
 }
 

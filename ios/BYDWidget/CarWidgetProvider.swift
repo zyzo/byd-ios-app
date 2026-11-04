@@ -30,16 +30,31 @@ struct CarProvider: TimelineProvider {
     func getTimeline(in context: Context, completion: @escaping (Timeline<CarEntry>) -> Void) {
         Task {
             let entry = await entry()
-            let next = Calendar.current.date(byAdding: .minute, value: entry.offline ? 5 : 15, to: .now)!
+            let next: Date
+            if entry.pending != nil {
+                // Check back soon in case the finishing reload is dropped.
+                next = .now.addingTimeInterval(5)
+            } else {
+                next = Calendar.current.date(byAdding: .minute, value: entry.offline ? 5 : 15, to: .now)!
+            }
             completion(Timeline(entries: [entry], policy: .after(next)))
         }
     }
 
     private func entry() async -> CarEntry {
-        // A button was just tapped: redraw from what we already know, right away,
-        // rather than making the spinner wait for the server.
-        if let pending = RecentCommands.pending, let status = RecentCommands.lastKnown {
-            return CarEntry(date: .now, status: status, pending: pending)
+        if let pending = RecentCommands.pending {
+            if let task = InflightCommand.task {
+                // A key was just tapped: redraw from what we already know, right away,
+                // so the spinner doesn't wait for the server.
+                if let status = RecentCommands.lastKnown {
+                    return CarEntry(date: .now, status: status, pending: pending)
+                }
+                await task.value
+            } else {
+                // The extension was restarted mid-command, so its fate is unknown.
+                // Not resent: the car may already have acted.
+                RecentCommands.pending = nil
+            }
         }
         do {
             var status = try await api.status()
@@ -52,6 +67,23 @@ struct CarProvider: TimelineProvider {
                 status = s
             }
             return CarEntry(date: .now, status: status, offline: true)
+        }
+    }
+}
+
+/// The command a widget key is sending, run in the extension after its intent has returned.
+enum InflightCommand {
+    static var task: Task<Void, Never>?
+
+    static func start(_ command: CarCommand) {
+        RecentCommands.pending = command
+        task = Task {
+            if (try? await CarAPI().run(command)) == true {
+                RecentCommands.record(command)
+            }
+            RecentCommands.pending = nil
+            task = nil
+            WidgetCenter.shared.reloadTimelines(ofKind: CarWidget.kind)
         }
     }
 }

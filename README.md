@@ -26,6 +26,10 @@ An unofficial iPhone app for BYD cars: see battery, range, locks, windows and ty
 
 A full-width widget shows battery, range and the lock state, with **Lock**, **Trunk**, **A/C** and **Honk** buttons that work without opening the app. Add it from the widget gallery (long-press the Home Screen, tap **+**, pick the app).
 
+<p align="center">
+  <img src="docs/screenshots/widget.png" width="420" alt="Home Screen widget: battery 31%, 143 km, locked, with lock, trunk, A/C and honk buttons">
+</p>
+
 Widget buttons always go through the server, since an extension can't use the car's Bluetooth key. The widget re-reads the car every 15 minutes, right after a command, and whenever the app loads or sends one. If the server can't be reached it dims the last known values and disables the buttons.
 
 ## How it works
