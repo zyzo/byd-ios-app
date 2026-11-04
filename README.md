@@ -66,8 +66,6 @@ If **Trunk** or **Windows** fail with "Remote command … blocked … reason=fun
 
 To run it on your Mac instead: `.venv/bin/uvicorn server:app --host 127.0.0.1 --port 8765`, and expose it to the iPhone however you like.
 
-`cloudflare/` has an alternative Cloudflare Containers setup (needs the Workers Paid plan): set the region in `cloudflare/wrangler.jsonc`, add the secrets with `npx wrangler secret put`, then run `npm install && npm run deploy` in that folder.
-
 ## 2. Build the app
 
 ```bash
