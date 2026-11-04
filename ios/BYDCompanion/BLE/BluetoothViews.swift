@@ -58,7 +58,7 @@ struct BluetoothSheet: View {
                             .disabled(importing)
                     }
                 } footer: {
-                    Text("With the key, lock, unlock, trunk and honk go straight to the car over Bluetooth when you're nearby. Everything else, and anything out of range, uses BYD's cloud.")
+                    Text("Lock, unlock, trunk and honk go over Bluetooth when nearby; everything else via BYD's cloud.")
                 }
                 if link.hasKey {
                     autoUnlockSection
@@ -135,7 +135,7 @@ struct BluetoothSheet: View {
                         ForEach(AutoUnlock.distances, id: \.self) { Text(AutoUnlock.label($0)).tag($0) }
                     }
                     .pickerStyle(.segmented)
-                    Text("Approximate. Walls, pockets and bags weaken the signal, so start short and widen it if it unlocks too late.")
+                    Text("Approximate. Widen it if it unlocks too late.")
                         .font(.footnote).foregroundStyle(.secondary)
                     signalNow
                 }
@@ -150,7 +150,7 @@ struct BluetoothSheet: View {
                 }
             } else if autoUnlock.needsAlways {
                 VStack(alignment: .leading, spacing: 10) {
-                    Label("Auto-unlock needs location set to Always, so the app can wake up near the car when it's closed.", systemImage: "exclamationmark.triangle")
+                    Label("Needs location set to Always.", systemImage: "exclamationmark.triangle")
                         .font(.subheadline)
                         .symbolRenderingMode(.multicolor)
                     Button("Open Settings", action: autoUnlock.openSettings)
@@ -161,7 +161,7 @@ struct BluetoothSheet: View {
         } header: {
             Text("Auto-unlock")
         } footer: {
-            Text("Unlocks only after you've been away from the car and come back, never while you're already nearby. Always over Bluetooth, never through BYD's cloud.")
+            Text("Only after you've been away and come back. Bluetooth only.")
         }
     }
 
@@ -211,7 +211,7 @@ struct BluetoothSheet: View {
                         ForEach(AutoUnlock.distances, id: \.self) { Text(AutoUnlock.label($0)).tag($0) }
                     }
                     .pickerStyle(.segmented)
-                    Text("Approximate. Start wide so a walk round the car or a stop at the trunk doesn't lock it, and narrow it if it locks too late.")
+                    Text("Approximate. Narrow it if it locks too late.")
                         .font(.footnote).foregroundStyle(.secondary)
                     signalNow
                     Text(autoLock.statusText)
@@ -223,13 +223,13 @@ struct BluetoothSheet: View {
         } header: {
             Text("Auto-lock")
         } footer: {
-            Text("Locks once the Bluetooth signal has stayed weaker than the chosen distance for a few seconds, only after you were at the car. Always over Bluetooth, never through BYD's cloud. It won't lock while the car is on or a door is open, and it does nothing if the phone stays in the car.")
+            Text("A few seconds after you walk past the chosen distance. Bluetooth only; not while the car is on or a door is open.")
         }
     }
 
     private var autoUnlockSubtitle: String {
         guard autoUnlock.isOn else { return "Off" }
-        guard autoUnlock.carLocation != nil else { return "On · connect to the car once so it knows where it's parked" }
+        guard autoUnlock.carLocation != nil else { return "On · connect once to learn where it's parked" }
         return "On · within about \(AutoUnlock.label(autoUnlock.distance))"
     }
 }
