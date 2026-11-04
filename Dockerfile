@@ -5,6 +5,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY server.py .
 
-# Credentials (BYD_*, APP_TOKEN) come from Cloudflare secrets as environment variables.
+# Settings (BYD_*, APP_TOKEN, BLE_KEY_JSON) come from Cloudflare vars and secrets as environment variables.
+ENV PYTHONUNBUFFERED=1
 EXPOSE 8080
 CMD ["uvicorn", "server:app", "--host", "0.0.0.0", "--port", "8080"]
