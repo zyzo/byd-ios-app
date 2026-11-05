@@ -9,14 +9,10 @@ An unofficial iPhone app for BYD cars: see battery, range, locks, windows and ty
 <p align="center">
   <img src="docs/screenshots/home.png" width="250" alt="Home screen: battery 78%, 812 km total range, car locked, Bluetooth ready">
   &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
-  <img src="docs/screenshots/controls.png" width="250" alt="Home screen with the car unlocked and the A/C on">
-  &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
   <img src="docs/screenshots/bluetooth.png" width="250" alt="Bluetooth key sheet with auto-unlock on and unlock distances from 50 cm to 5 m">
 </p>
 
 <p align="center">
-  <img src="docs/screenshots/trips-card.png" width="250" alt="Home screen with the Trips card: 76 km this month, 8.6 kWh and 1.8 L, 74kđ">
-  &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
   <img src="docs/screenshots/trips-sheet.png" width="250" alt="Trips sheet: a week of kilometres per day, electric over petrol, and the week's trips by day">
   &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
   <img src="docs/screenshots/trips-detail.png" width="250" alt="Trip detail: 38 km, 2.6 kWh, 1.8 L, 52kđ, what the car reported and the cost at that day's prices">
