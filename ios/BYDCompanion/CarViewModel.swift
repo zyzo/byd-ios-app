@@ -17,6 +17,8 @@ final class CarViewModel {
     let ble = AppServices.shared.ble
     let autoUnlock = AppServices.shared.autoUnlock
     let autoLock = AppServices.shared.autoLock
+    let trips = AppServices.shared.trips
+    let tripLogger = AppServices.shared.tripLogger
     private let api = CarAPI()
 
     /// Fetches the Bluetooth key from the Mac server and stores it in the Keychain.
@@ -33,6 +35,8 @@ final class CarViewModel {
     func load(refresh: Bool = false) async {
         isRefreshing = true
         defer { isRefreshing = false }
+        // The trip log syncs alongside, never holding up the car's status.
+        Task { await tripLogger.sync() }
         do {
             status = try await api.status(refresh: refresh)
             stale = false

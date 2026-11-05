@@ -5,6 +5,8 @@ struct CarStatus: Codable, Equatable {
     var model: String?
     var plate: String?
     var batteryPercent: Double?
+    /// Fuel level, percent of the tank. Not reported by every car.
+    var fuelPercent: Double?
     var rangeTotalKm: Double?
     var rangeElectricKm: Double?
     var rangeFuelKm: Double?
@@ -21,6 +23,10 @@ struct CarStatus: Codable, Equatable {
     /// When the car produced the data, and when the server received it.
     var updatedAt: Date?
     var receivedAt: Date?
+    /// A refresh was asked for and the car didn't answer with anything newer.
+    var stale: Bool?
+    /// `push`, `poll` or `projection` (see README, "What the server returns").
+    var source: String?
 
     struct Tyres: Codable, Equatable {
         var frontLeft: Double?
@@ -49,6 +55,7 @@ struct CarStatus: Codable, Equatable {
         model: "Sealion 6",
         plate: nil,
         batteryPercent: 78,
+        fuelPercent: 61,
         rangeTotalKm: 812,
         rangeElectricKm: 74,
         rangeFuelKm: 738,
@@ -64,7 +71,9 @@ struct CarStatus: Codable, Equatable {
         tyresBar: .init(frontLeft: 2.5, frontRight: 2.5, rearLeft: 2.4, rearRight: 2.5),
         // Matches the 9:41 status bar used for screenshots.
         updatedAt: Calendar.current.date(bySettingHour: 9, minute: 40, second: 0, of: Date()),
-        receivedAt: Date()
+        receivedAt: Date(),
+        stale: false,
+        source: "push"
     )
 
     /// Decodes the server's JSON. Its timestamps are ISO 8601 with or without fractional seconds.

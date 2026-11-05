@@ -56,6 +56,8 @@ final class AutoUnlock: NSObject {
     }
 
     private let link: BleCarLink
+    /// Another phone is driving the car (it holds the server's lease): never arm then.
+    private let otherPhoneLeads: () -> Bool
     private let manager = CLLocationManager()
     private let defaults = UserDefaults.standard
     private var armedAt: Date? {
@@ -66,8 +68,9 @@ final class AutoUnlock: NSObject {
     private var watchTimer: Timer?
     private var watchStarted: Date?
 
-    init(link: BleCarLink) {
+    init(link: BleCarLink, otherPhoneLeads: @escaping () -> Bool = { false }) {
         self.link = link
+        self.otherPhoneLeads = otherPhoneLeads
         wanted = defaults.bool(forKey: Keys.wanted)
         var saved = defaults.integer(forKey: Keys.distance)
         if [1, 2, 3, 5].contains(saved) { saved *= 100 }  // older versions saved metres
@@ -287,6 +290,11 @@ extension AutoUnlock: CLLocationManagerDelegate {
             guard isOn, region.identifier == Self.regionID else { return }
             // Connected while leaving means you're driving the car: don't arm.
             guard link.state != .ready else { return }
+            // Likewise when the other phone is driving it (you're probably a passenger).
+            guard !otherPhoneLeads() else {
+                link.note("Auto-unlock not armed: another phone is driving the car")
+                return
+            }
             armedAt = Date()
             link.note("Auto-unlock armed: you left the car's area")
         }

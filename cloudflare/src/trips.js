@@ -1,0 +1,906 @@
+// Trip and energy log kept in the BydServer Durable Object's SQLite.
+//
+// The container (server.py) only keeps a short ring of car snapshots; the Worker's cron pulls
+// them here, derives trips, prices them and attaches the phones' departure/arrival events.
+// Everything below is plain ESM with no Cloudflare imports so the maths can run under node:test.
+
+export const DEFAULT_EV_RATE = 0.17; // kWh per km, until enough all-electric trips teach a real one
+export const EVENT_WINDOW_MS = 15 * 60 * 1000;
+export const CALIBRATION_READINGS = 3;
+export const CALIBRATION_TOLERANCE = 0.1;
+const ENERGY_INTERVAL_MS = 60 * 60 * 1000;
+const EVENT_RETENTION_DAYS = 7;
+
+const SCHEMA_VERSION = 1;
+
+const MIGRATIONS = [
+  // v1
+  `
+  CREATE TABLE IF NOT EXISTS snapshots (
+    at TEXT PRIMARY KEY,
+    received_at TEXT,
+    odometer_km REAL NOT NULL,
+    battery_percent REAL NOT NULL,
+    fuel_percent REAL,
+    range_electric_km REAL,
+    range_fuel_km REAL,
+    power_on INTEGER NOT NULL,
+    charging INTEGER NOT NULL,
+    source TEXT
+  );
+  CREATE TABLE IF NOT EXISTS trips (
+    id TEXT PRIMARY KEY,
+    start_at TEXT NOT NULL,
+    end_at TEXT NOT NULL,
+    odo_start REAL NOT NULL,
+    odo_end REAL NOT NULL,
+    soc_start REAL,
+    soc_end REAL,
+    fuel_start REAL,
+    fuel_end REAL,
+    kwh REAL,
+    litres REAL,
+    ev_km REAL,
+    petrol_km REAL,
+    price_kwh REAL,
+    price_litre REAL,
+    petrol_cycle TEXT,
+    phone_id TEXT,
+    start_lat REAL,
+    start_lon REAL,
+    end_lat REAL,
+    end_lon REAL,
+    flags TEXT NOT NULL DEFAULT '[]',
+    source TEXT NOT NULL DEFAULT 'car',
+    deleted_at TEXT,
+    created_at TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS trips_end_at ON trips(end_at);
+  CREATE TABLE IF NOT EXISTS phone_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    phone_id TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    at TEXT NOT NULL,
+    lat REAL,
+    lon REAL,
+    trip_id TEXT,
+    UNIQUE(phone_id, kind, at)
+  );
+  CREATE TABLE IF NOT EXISTS phones (
+    id TEXT PRIMARY KEY,
+    name TEXT,
+    last_seen TEXT
+  );
+  CREATE TABLE IF NOT EXISTS settings (
+    key TEXT PRIMARY KEY,
+    value TEXT
+  );
+  CREATE TABLE IF NOT EXISTS leases (
+    kind TEXT PRIMARY KEY,
+    phone_id TEXT NOT NULL,
+    until TEXT NOT NULL
+  );
+  `,
+];
+
+// Runs every migration past the stored version. Safe to call on every request.
+export function migrate(sql) {
+  sql.exec(`CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL)`);
+  const row = sql.exec(`SELECT version FROM schema_version`).toArray()[0];
+  let version = row ? row.version : 0;
+  if (!row) sql.exec(`INSERT INTO schema_version (version) VALUES (0)`);
+  while (version < SCHEMA_VERSION) {
+    for (const statement of MIGRATIONS[version].split(";")) {
+      if (statement.trim()) sql.exec(statement);
+    }
+    version += 1;
+    sql.exec(`UPDATE schema_version SET version = ?`, version);
+  }
+  return version;
+}
+
+const iso = (value) => new Date(value).toISOString();
+const ms = (value) => new Date(value).getTime();
+const round = (value, digits = 2) => (value == null ? null : Math.round(value * 10 ** digits) / 10 ** digits);
+const median = (values) => {
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+};
+const isNumber = (value) => typeof value === "number" && Number.isFinite(value);
+
+// Snapshot fields as the container serves them, normalised.
+export function normaliseSnapshot(raw) {
+  return {
+    at: iso(raw.at),
+    receivedAt: raw.receivedAt ? iso(raw.receivedAt) : null,
+    odometerKm: Number(raw.odometerKm),
+    batteryPercent: Number(raw.batteryPercent),
+    fuelPercent: isNumber(raw.fuelPercent) ? raw.fuelPercent : null,
+    rangeElectricKm: isNumber(raw.rangeElectricKm) ? raw.rangeElectricKm : null,
+    rangeFuelKm: isNumber(raw.rangeFuelKm) ? raw.rangeFuelKm : null,
+    powerOn: Boolean(raw.powerOn),
+    charging: Boolean(raw.charging),
+    source: raw.source ?? null,
+  };
+}
+
+function openFrom(snapshot) {
+  return {
+    startAt: snapshot.at,
+    odoStart: snapshot.odometerKm,
+    socStart: snapshot.batteryPercent,
+    fuelStart: snapshot.fuelPercent,
+    chargedSeen: false,
+    lastSnapshot: snapshot,
+  };
+}
+
+function closeTrip(open, snapshot, source) {
+  return {
+    id: crypto.randomUUID(),
+    startAt: open.startAt,
+    endAt: snapshot.at,
+    odoStart: open.odoStart,
+    odoEnd: snapshot.odometerKm,
+    socStart: open.socStart,
+    socEnd: snapshot.batteryPercent,
+    fuelStart: open.fuelStart,
+    fuelEnd: snapshot.fuelPercent,
+    chargedSeen: open.chargedSeen || snapshot.charging,
+    source,
+  };
+}
+
+// Walks snapshots (ascending by `at`) and turns power-on → power-off pairs into trips.
+// `openTrip` is the trip still in progress from the previous run (or null); `prev` is the last
+// snapshot seen before this batch, used to spot odometer jumps between two power-off reports
+// (a drive the pushes missed), which become `coarse` trips. Returns the closed trips and the
+// new cursor so the caller can resume from exactly here next time.
+export function deriveTrips(snapshots, openTrip = null, prev = null) {
+  const trips = [];
+  let open = openTrip;
+  for (const raw of snapshots) {
+    const snapshot = normaliseSnapshot(raw);
+    if (open) {
+      if (snapshot.charging) open.chargedSeen = true;
+      if (snapshot.powerOn) {
+        open.lastSnapshot = snapshot;
+      } else {
+        if (snapshot.odometerKm - open.odoStart >= 1) trips.push(closeTrip(open, snapshot, "car"));
+        open = null;
+      }
+    } else if (snapshot.powerOn) {
+      open = openFrom(snapshot);
+      // Distance already driven between the last power-off report and this power-on one.
+      if (prev && !prev.powerOn && snapshot.odometerKm - prev.odometerKm >= 1) {
+        trips.push(closeTrip(openFrom(prev), snapshot, "coarse"));
+      }
+    } else if (prev && snapshot.odometerKm - prev.odometerKm >= 1) {
+      trips.push(closeTrip(openFrom(prev), snapshot, "coarse"));
+    }
+    prev = snapshot;
+  }
+  return { trips, openTrip: open, prev };
+}
+
+// Median kWh/km of all-electric trips of 5 km or more; the seed until there are any.
+export function learnEvRate(trips) {
+  const rates = trips
+    .filter((t) => t.km >= 5 && t.litres === 0 && t.kwh > 0 && !t.flags?.includes("chargedDuringTrip"))
+    .map((t) => t.kwh / t.km);
+  return rates.length ? median(rates) : DEFAULT_EV_RATE;
+}
+
+// Fills in distance, energy, electric share, flags and (when both prices are known) cost.
+export function computeTrip(trip, settings = {}, prices = null) {
+  const batteryKwh = settings.batteryKwh ?? 0;
+  const tankLitres = settings.tankLitres ?? 0;
+  const evRate = settings.evRate ?? DEFAULT_EV_RATE;
+  const km = Math.max(0, trip.odoEnd - trip.odoStart);
+  const socDelta = isNumber(trip.socStart) && isNumber(trip.socEnd) ? trip.socStart - trip.socEnd : null;
+  const fuelDelta = isNumber(trip.fuelStart) && isNumber(trip.fuelEnd) ? trip.fuelStart - trip.fuelEnd : null;
+  const kwh = socDelta == null ? 0 : round((Math.max(0, socDelta) / 100) * batteryKwh);
+  const litres = fuelDelta == null ? 0 : round((Math.max(0, fuelDelta) / 100) * tankLitres);
+
+  const flags = [];
+  if (trip.chargedSeen || (socDelta != null && socDelta < 0)) flags.push("chargedDuringTrip");
+  if (fuelDelta != null && fuelDelta < 0) flags.push("refuelledDuringTrip");
+  if (km > 0 && socDelta === 0 && (fuelDelta === 0 || fuelDelta == null)) flags.push("tooShortToMeasure");
+  if (!trip.phoneId) flags.push("withoutPhone");
+
+  // No petrol burnt means the whole distance was electric; otherwise the learnt rate splits it.
+  let evKm = litres === 0 ? km : Math.min(km, evRate > 0 ? kwh / evRate : 0);
+  if (kwh === 0 && litres > 0) evKm = 0;
+  evKm = round(evKm, 1);
+  const petrolKm = round(km - evKm, 1);
+  const electricShare = km > 0 ? round(evKm / km, 3) : null;
+
+  const priceKwh = isNumber(settings.priceKwh) ? settings.priceKwh : null;
+  const priceLitre = isNumber(settings.petrolOverrideVndPerLitre)
+    ? settings.petrolOverrideVndPerLitre
+    : isNumber(prices?.petrol?.vndPerLitre)
+      ? prices.petrol.vndPerLitre
+      : null;
+  const petrolCycle = isNumber(settings.petrolOverrideVndPerLitre) ? null : (prices?.petrol?.cycle ?? null);
+  let cost = null;
+  if (priceKwh != null && priceLitre != null && km > 0) {
+    const total = Math.round(kwh * priceKwh + litres * priceLitre);
+    cost = { total, perKm: Math.round(total / km), priceKwh, priceLitre, petrolCycle };
+  }
+
+  return {
+    ...trip,
+    km,
+    kwh,
+    litres,
+    evKm,
+    petrolKm,
+    electricShare,
+    cost,
+    flags,
+    priceKwh,
+    priceLitre,
+    petrolCycle,
+  };
+}
+
+function near(a, b) {
+  return Math.abs(ms(a) - ms(b)) <= EVENT_WINDOW_MS;
+}
+
+// Matches each phone's departure/arrival events to trips: a departure within 15 minutes of a
+// trip's start (or inside the trip) sets its phone and exact start; an arrival likewise its end.
+// Returns the trips that changed and which events were attached; the rest stay for a later run.
+export function attachEvents(trips, events) {
+  const attachments = [];
+  const changed = new Map();
+  const candidates = trips.filter((t) => !t.deletedAt);
+  const sorted = [...events].sort((a, b) => ms(a.at) - ms(b.at));
+
+  for (const trip of candidates) {
+    const startMs = ms(trip.startAt);
+    const endMs = ms(trip.endAt);
+    const inside = (at) => ms(at) >= startMs - EVENT_WINDOW_MS && ms(at) <= endMs + EVENT_WINDOW_MS;
+    const byPhone = new Map();
+    for (const event of sorted) {
+      if (event.tripId || !inside(event.at)) continue;
+      if (trip.phoneId && event.phoneId !== trip.phoneId) continue;
+      const fits = event.kind === "departure" ? near(event.at, trip.startAt) : near(event.at, trip.endAt);
+      if (!fits) continue;
+      const slot = byPhone.get(event.phoneId) ?? {};
+      if (!slot[event.kind]) slot[event.kind] = event;
+      byPhone.set(event.phoneId, slot);
+    }
+    if (!byPhone.size) continue;
+    // The phone with both ends matched wins; among equals, the earliest departure.
+    const [phoneId, slot] = [...byPhone.entries()].sort((a, b) => {
+      const score = (s) => (s.departure ? 1 : 0) + (s.arrival ? 1 : 0);
+      const diff = score(b[1]) - score(a[1]);
+      if (diff) return diff;
+      return ms(a[1].departure?.at ?? a[1].arrival.at) - ms(b[1].departure?.at ?? b[1].arrival.at);
+    })[0];
+    const updated = { ...trip, phoneId };
+    if (slot.departure) {
+      updated.startAt = iso(slot.departure.at);
+      if (isNumber(slot.departure.lat) && isNumber(slot.departure.lon)) {
+        updated.startLocation = { lat: slot.departure.lat, lon: slot.departure.lon };
+      }
+      slot.departure.tripId = trip.id;
+      attachments.push({ eventId: slot.departure.id, tripId: trip.id });
+    }
+    if (slot.arrival) {
+      updated.endAt = iso(slot.arrival.at);
+      if (isNumber(slot.arrival.lat) && isNumber(slot.arrival.lon)) {
+        updated.endLocation = { lat: slot.arrival.lat, lon: slot.arrival.lon };
+      }
+      slot.arrival.tripId = trip.id;
+      attachments.push({ eventId: slot.arrival.id, tripId: trip.id });
+    }
+    updated.flags = (updated.flags ?? []).filter((f) => f !== "withoutPhone");
+    changed.set(trip.id, updated);
+  }
+  const unattached = sorted.filter((e) => !e.tripId);
+  return { trips: [...changed.values()], attachments, unattached };
+}
+
+// Percent consumed between consecutive snapshots, ignoring increases (charging, refuelling).
+function consumedOver(snapshots, field) {
+  let used = 0;
+  for (let i = 1; i < snapshots.length; i += 1) {
+    const a = snapshots[i - 1][field];
+    const b = snapshots[i][field];
+    if (isNumber(a) && isNumber(b) && b < a) used += a - b;
+  }
+  return used;
+}
+
+// Compares BYD's last-50 km energy figures with the percentage drops over the same distance
+// to measure the real battery capacity and tank size. One reading per /energy update; the
+// value is adopted once three readings agree within 10 %, unless the person set it by hand.
+export function calibrate(snapshots, energy, state = {}) {
+  const next = {
+    batteryReadings: [...(state.batteryReadings ?? [])],
+    tankReadings: [...(state.tankReadings ?? [])],
+    batteryKwh: state.batteryKwh ?? null,
+    tankLitres: state.tankLitres ?? null,
+    batterySource: state.batterySource ?? "model",
+    tankSource: state.tankSource ?? "model",
+    lastEnergyAt: state.lastEnergyAt ?? null,
+  };
+  const last50 = energy?.last50km;
+  if (!last50 || !snapshots.length) return next;
+  const stamp = energy.updatedAt ?? null;
+  if (stamp && stamp === next.lastEnergyAt) return next;
+  next.lastEnergyAt = stamp;
+
+  const ordered = snapshots.map(normaliseSnapshot).sort((a, b) => ms(a.at) - ms(b.at));
+  const latest = ordered[ordered.length - 1];
+  const window = ordered.filter((s) => s.odometerKm >= latest.odometerKm - 50);
+  if (window.length < 2 || latest.odometerKm - window[0].odometerKm < 40) return next;
+
+  const socUsed = consumedOver(window, "batteryPercent");
+  if (isNumber(last50.evKwh) && last50.evKwh > 0.5 && socUsed >= 10) {
+    next.batteryReadings.push(round(last50.evKwh / (socUsed / 100), 2));
+  }
+  const fuelUsed = consumedOver(window, "fuelPercent");
+  if (isNumber(last50.petrolLitres) && last50.petrolLitres > 1 && fuelUsed >= 5) {
+    next.tankReadings.push(round(last50.petrolLitres / (fuelUsed / 100), 1));
+  }
+  next.batteryReadings = next.batteryReadings.slice(-10);
+  next.tankReadings = next.tankReadings.slice(-10);
+
+  const adopt = (readings) => {
+    const recent = readings.slice(-CALIBRATION_READINGS);
+    if (recent.length < CALIBRATION_READINGS) return null;
+    const mid = median(recent);
+    return recent.every((r) => Math.abs(r - mid) / mid <= CALIBRATION_TOLERANCE) ? mid : null;
+  };
+  const battery = adopt(next.batteryReadings);
+  if (battery != null && next.batterySource !== "manual") {
+    next.batteryKwh = round(battery, 1);
+    next.batterySource = "measured";
+  }
+  const tank = adopt(next.tankReadings);
+  if (tank != null && next.tankSource !== "manual") {
+    next.tankLitres = round(tank, 0);
+    next.tankSource = "measured";
+  }
+  return next;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Store: everything that touches SQLite. `sql` is `ctx.storage.sql` (or a node:sqlite shim in
+// tests) with `exec(query, ...bindings)` returning a cursor with `toArray()`.
+
+const PUBLIC_SETTINGS = [
+  "priceKwh",
+  "petrolOverrideVndPerLitre",
+  "batteryKwh",
+  "tankLitres",
+  "batterySource",
+  "tankSource",
+  "notifyOnTrip",
+];
+const DEFAULT_SETTINGS = {
+  priceKwh: null,
+  petrolOverrideVndPerLitre: null,
+  batteryKwh: null,
+  tankLitres: null,
+  batterySource: "model",
+  tankSource: "model",
+  notifyOnTrip: false,
+};
+
+export class TripStore {
+  constructor(sql, { now = () => new Date() } = {}) {
+    this.sql = sql;
+    this.now = now;
+    migrate(sql);
+  }
+
+  rows(query, ...bindings) {
+    return this.sql.exec(query, ...bindings).toArray();
+  }
+
+  run(query, ...bindings) {
+    this.sql.exec(query, ...bindings);
+  }
+
+  // Settings are one JSON value per key; keys starting with "_" are internal state.
+  getSetting(key, fallback = null) {
+    const row = this.rows(`SELECT value FROM settings WHERE key = ?`, key)[0];
+    return row ? JSON.parse(row.value) : fallback;
+  }
+
+  setSetting(key, value) {
+    this.run(
+      `INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+      key,
+      JSON.stringify(value ?? null),
+    );
+  }
+
+  getSettings() {
+    const settings = { ...DEFAULT_SETTINGS };
+    for (const row of this.rows(`SELECT key, value FROM settings`)) {
+      if (PUBLIC_SETTINGS.includes(row.key)) settings[row.key] = JSON.parse(row.value);
+    }
+    settings.evRate = this.getSetting("_evRate", DEFAULT_EV_RATE);
+    return settings;
+  }
+
+  putSettings(patch) {
+    for (const key of PUBLIC_SETTINGS) {
+      if (!(key in patch)) continue;
+      const value = patch[key];
+      if (key === "batteryKwh" && isNumber(value) && value > 0) {
+        this.setSetting("batteryKwh", value);
+        this.setSetting("batterySource", patch.batterySource === "model" ? "model" : "manual");
+      } else if (key === "tankLitres" && isNumber(value) && value > 0) {
+        this.setSetting("tankLitres", value);
+        this.setSetting("tankSource", patch.tankSource === "model" ? "model" : "manual");
+      } else if (key === "batterySource" || key === "tankSource") {
+        // Written together with the value above; on its own it can only reset to "model".
+        const valueKey = key === "batterySource" ? "batteryKwh" : "tankLitres";
+        if (value === "model" && !(valueKey in patch)) this.setSetting(key, "model");
+      } else if (key === "notifyOnTrip") {
+        this.setSetting(key, Boolean(value));
+      } else if (value === null || isNumber(value)) {
+        this.setSetting(key, value);
+      }
+    }
+    return this.getSettings();
+  }
+
+  // --- snapshots ---------------------------------------------------------------------------
+
+  insertSnapshots(raws) {
+    let inserted = 0;
+    for (const raw of raws) {
+      const s = normaliseSnapshot(raw);
+      if (!isNumber(s.odometerKm) || s.odometerKm <= 0) continue;
+      const before = this.rows(`SELECT 1 AS x FROM snapshots WHERE at = ?`, s.at).length;
+      if (before) continue;
+      this.run(
+        `INSERT INTO snapshots (at, received_at, odometer_km, battery_percent, fuel_percent, range_electric_km,
+           range_fuel_km, power_on, charging, source) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        s.at,
+        s.receivedAt,
+        s.odometerKm,
+        s.batteryPercent,
+        s.fuelPercent,
+        s.rangeElectricKm,
+        s.rangeFuelKm,
+        s.powerOn ? 1 : 0,
+        s.charging ? 1 : 0,
+        s.source,
+      );
+      inserted += 1;
+    }
+    return inserted;
+  }
+
+  snapshotsAfter(at, limit = 5000) {
+    const rows = at
+      ? this.rows(`SELECT * FROM snapshots WHERE at > ? ORDER BY at LIMIT ?`, at, limit)
+      : this.rows(`SELECT * FROM snapshots ORDER BY at LIMIT ?`, limit);
+    return rows.map(snapshotFromRow);
+  }
+
+  lastSnapshotAt() {
+    return this.rows(`SELECT MAX(at) AS at FROM snapshots`)[0]?.at ?? null;
+  }
+
+  // --- trips -------------------------------------------------------------------------------
+
+  insertTrip(trip) {
+    this.run(
+      `INSERT INTO trips (id, start_at, end_at, odo_start, odo_end, soc_start, soc_end, fuel_start, fuel_end,
+         kwh, litres, ev_km, petrol_km, price_kwh, price_litre, petrol_cycle, phone_id, start_lat, start_lon,
+         end_lat, end_lon, flags, source, deleted_at, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)`,
+      trip.id,
+      trip.startAt,
+      trip.endAt,
+      trip.odoStart,
+      trip.odoEnd,
+      trip.socStart ?? null,
+      trip.socEnd ?? null,
+      trip.fuelStart ?? null,
+      trip.fuelEnd ?? null,
+      trip.kwh,
+      trip.litres,
+      trip.evKm,
+      trip.petrolKm,
+      trip.priceKwh ?? null,
+      trip.priceLitre ?? null,
+      trip.petrolCycle ?? null,
+      trip.phoneId ?? null,
+      trip.startLocation?.lat ?? null,
+      trip.startLocation?.lon ?? null,
+      trip.endLocation?.lat ?? null,
+      trip.endLocation?.lon ?? null,
+      JSON.stringify(trip.flags ?? []),
+      trip.source ?? "car",
+      this.now().toISOString(),
+    );
+  }
+
+  updateTripAttachment(trip) {
+    this.run(
+      `UPDATE trips SET start_at = ?, end_at = ?, phone_id = ?, start_lat = ?, start_lon = ?, end_lat = ?, end_lon = ?,
+         flags = ? WHERE id = ?`,
+      trip.startAt,
+      trip.endAt,
+      trip.phoneId ?? null,
+      trip.startLocation?.lat ?? null,
+      trip.startLocation?.lon ?? null,
+      trip.endLocation?.lat ?? null,
+      trip.endLocation?.lon ?? null,
+      JSON.stringify(trip.flags ?? []),
+      trip.id,
+    );
+  }
+
+  tripRows({ since = null, limit = 200, includeDeleted = false } = {}) {
+    let rows;
+    if (since) {
+      rows = this.rows(
+        `SELECT t.*, p.name AS phone_name FROM trips t LEFT JOIN phones p ON p.id = t.phone_id
+         WHERE t.end_at >= ? OR t.created_at >= ? OR (t.deleted_at IS NOT NULL AND t.deleted_at >= ?)
+         ORDER BY t.end_at DESC LIMIT ?`,
+        since,
+        since,
+        since,
+        limit,
+      );
+    } else {
+      rows = this.rows(
+        `SELECT t.*, p.name AS phone_name FROM trips t LEFT JOIN phones p ON p.id = t.phone_id
+         ${includeDeleted ? "" : "WHERE t.deleted_at IS NULL"} ORDER BY t.end_at DESC LIMIT ?`,
+        limit,
+      );
+    }
+    return rows.map(tripFromRow);
+  }
+
+  listTrips({ since = null, limit = 200 } = {}) {
+    const trips = this.tripRows({ since, limit, includeDeleted: Boolean(since) });
+    return {
+      trips: trips.map(publicTrip),
+      openTrip: this.openTripPublic(),
+      settings: this.getSettings(),
+      prices: this.getSetting("_prices", null),
+      energy: this.getSetting("_energy", null),
+      serverTime: this.now().toISOString(),
+    };
+  }
+
+  openTripPublic() {
+    const cursor = this.getSetting("_cursor", {});
+    const open = cursor.openTrip;
+    if (!open) return null;
+    const last = open.lastSnapshot;
+    return {
+      startAt: open.startAt,
+      odoStart: open.odoStart,
+      socStart: open.socStart,
+      fuelStart: open.fuelStart,
+      km: last ? Math.max(0, last.odometerKm - open.odoStart) : 0,
+      lastSeenAt: last?.at ?? open.startAt,
+    };
+  }
+
+  deleteTrip(id) {
+    const exists = this.rows(`SELECT 1 AS x FROM trips WHERE id = ?`, id).length;
+    if (!exists) return false;
+    this.run(`UPDATE trips SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL`, this.now().toISOString(), id);
+    return true;
+  }
+
+  // --- phones and events -------------------------------------------------------------------
+
+  touchPhone(phoneId, phoneName) {
+    if (!phoneId) return;
+    this.run(
+      `INSERT INTO phones (id, name, last_seen) VALUES (?, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET name = COALESCE(excluded.name, phones.name), last_seen = excluded.last_seen`,
+      phoneId,
+      phoneName ?? null,
+      this.now().toISOString(),
+    );
+  }
+
+  postEvents({ phoneId, phoneName, events = [] }) {
+    if (!phoneId) throw new HttpError(400, "phoneId required");
+    this.touchPhone(phoneId, phoneName);
+    for (const event of events) {
+      if (!["departure", "arrival"].includes(event.kind) || !event.at) continue;
+      this.run(
+        `INSERT OR IGNORE INTO phone_events (phone_id, kind, at, lat, lon) VALUES (?, ?, ?, ?, ?)`,
+        phoneId,
+        event.kind,
+        iso(event.at),
+        isNumber(event.lat) ? event.lat : null,
+        isNumber(event.lon) ? event.lon : null,
+      );
+    }
+    return { attached: this.attachPendingEvents() };
+  }
+
+  attachPendingEvents() {
+    const horizon = new Date(this.now().getTime() - EVENT_RETENTION_DAYS * 86400000).toISOString();
+    const events = this.rows(`SELECT * FROM phone_events WHERE trip_id IS NULL AND at >= ? ORDER BY at`, horizon).map(
+      (r) => ({ id: r.id, phoneId: r.phone_id, kind: r.kind, at: r.at, lat: r.lat, lon: r.lon, tripId: null }),
+    );
+    if (!events.length) return 0;
+    const trips = this.rows(`SELECT * FROM trips WHERE deleted_at IS NULL AND end_at >= ? ORDER BY start_at`, horizon).map(
+      tripFromRow,
+    );
+    const result = attachEvents(trips, events);
+    for (const trip of result.trips) this.updateTripAttachment(trip);
+    for (const { eventId, tripId } of result.attachments) {
+      this.run(`UPDATE phone_events SET trip_id = ? WHERE id = ?`, tripId, eventId);
+    }
+    return result.attachments.length;
+  }
+
+  getPhones() {
+    const phones = this.rows(`SELECT id, name, last_seen FROM phones ORDER BY last_seen DESC`).map((r) => ({
+      id: r.id,
+      name: r.name,
+      lastSeen: r.last_seen,
+    }));
+    return { phones, leader: this.leader("car") };
+  }
+
+  // --- leases ------------------------------------------------------------------------------
+
+  leader(kind) {
+    const row = this.rows(
+      `SELECT l.phone_id, l.until, p.name FROM leases l LEFT JOIN phones p ON p.id = l.phone_id WHERE l.kind = ?`,
+      kind,
+    )[0];
+    if (!row || ms(row.until) <= this.now().getTime()) return null;
+    return { phoneId: row.phone_id, name: row.name ?? null, until: row.until };
+  }
+
+  lease({ phoneId, phoneName, kind = "car", ttlSeconds = 120 }) {
+    if (!phoneId) throw new HttpError(400, "phoneId required");
+    this.touchPhone(phoneId, phoneName);
+    const current = this.leader(kind);
+    if (current && current.phoneId !== phoneId) return { granted: false, leader: current };
+    const ttl = Math.min(Math.max(Number(ttlSeconds) || 120, 10), 3600);
+    const until = new Date(this.now().getTime() + ttl * 1000).toISOString();
+    this.run(
+      `INSERT INTO leases (kind, phone_id, until) VALUES (?, ?, ?)
+       ON CONFLICT(kind) DO UPDATE SET phone_id = excluded.phone_id, until = excluded.until`,
+      kind,
+      phoneId,
+      until,
+    );
+    return { granted: true, leader: this.leader(kind) };
+  }
+
+  // --- sync from the container -------------------------------------------------------------
+
+  // `fetchJson(path)` resolves to the parsed body or null when the container did not answer.
+  async sync(fetchJson) {
+    const report = { snapshots: 0, trips: 0, attached: 0, prices: false, energy: false };
+    const lastAt = this.lastSnapshotAt();
+    const since = lastAt ? `?since=${encodeURIComponent(lastAt)}` : "";
+    const [snapshotBody, prices] = await Promise.all([fetchJson(`/snapshots${since}`), fetchJson("/prices")]);
+
+    if (prices && typeof prices === "object") {
+      this.setSetting("_prices", { ...prices, syncedAt: this.now().toISOString() });
+      report.prices = true;
+      const hint = prices.capacityHint;
+      if (hint) {
+        if (this.getSetting("batteryKwh") == null && isNumber(hint.batteryKwh)) {
+          this.setSetting("batteryKwh", hint.batteryKwh);
+          this.setSetting("batterySource", "model");
+        }
+        if (this.getSetting("tankLitres") == null && isNumber(hint.tankLitres)) {
+          this.setSetting("tankLitres", hint.tankLitres);
+          this.setSetting("tankSource", "model");
+        }
+      }
+    }
+
+    if (Array.isArray(snapshotBody?.snapshots)) {
+      report.snapshots = this.insertSnapshots(snapshotBody.snapshots);
+    }
+    report.trips = this.deriveNewTrips();
+    report.attached = this.attachPendingEvents();
+
+    const lastEnergyPoll = this.getSetting("_energyPolledAt", null);
+    if (!lastEnergyPoll || this.now().getTime() - ms(lastEnergyPoll) >= ENERGY_INTERVAL_MS) {
+      this.setSetting("_energyPolledAt", this.now().toISOString());
+      const energy = await fetchJson("/energy");
+      if (energy?.last50km) {
+        this.setSetting("_energy", energy);
+        report.energy = true;
+        this.runCalibration(energy);
+      }
+    }
+    return report;
+  }
+
+  deriveNewTrips() {
+    const cursor = this.getSetting("_cursor", {});
+    const snapshots = this.snapshotsAfter(cursor.lastAt ?? null);
+    if (!snapshots.length) return 0;
+    const result = deriveTrips(snapshots, cursor.openTrip ?? null, cursor.prev ?? null);
+    const settings = this.getSettings();
+    const prices = this.getSetting("_prices", null);
+    for (const raw of result.trips) {
+      const trip = computeTrip(raw, settings, prices);
+      this.insertTrip(trip);
+    }
+    if (result.trips.length) {
+      const recent = this.tripRows({ limit: 100 });
+      this.setSetting("_evRate", round(learnEvRate(recent), 3));
+    }
+    this.setSetting("_cursor", {
+      lastAt: snapshots[snapshots.length - 1].at,
+      openTrip: result.openTrip,
+      prev: result.prev,
+    });
+    return result.trips.length;
+  }
+
+  runCalibration(energy) {
+    const state = {
+      batteryReadings: this.getSetting("_batteryReadings", []),
+      tankReadings: this.getSetting("_tankReadings", []),
+      batteryKwh: this.getSetting("batteryKwh"),
+      tankLitres: this.getSetting("tankLitres"),
+      batterySource: this.getSetting("batterySource", "model"),
+      tankSource: this.getSetting("tankSource", "model"),
+      lastEnergyAt: this.getSetting("_lastEnergyAt"),
+    };
+    const snapshots = this.rows(`SELECT * FROM snapshots ORDER BY at DESC LIMIT 400`).map(snapshotFromRow).reverse();
+    const next = calibrate(snapshots, energy, state);
+    this.setSetting("_batteryReadings", next.batteryReadings);
+    this.setSetting("_tankReadings", next.tankReadings);
+    this.setSetting("_lastEnergyAt", next.lastEnergyAt);
+    if (next.batteryKwh != null) this.setSetting("batteryKwh", next.batteryKwh);
+    if (next.tankLitres != null) this.setSetting("tankLitres", next.tankLitres);
+    this.setSetting("batterySource", next.batterySource);
+    this.setSetting("tankSource", next.tankSource);
+    return next;
+  }
+
+  // --- HTTP ----------------------------------------------------------------------------------
+
+  // Answers the trip-log routes; returns null for anything the container should serve.
+  async handle(request) {
+    const url = new URL(request.url);
+    const path = url.pathname.replace(/\/+$/, "") || "/";
+    const method = request.method.toUpperCase();
+    try {
+      if (path === "/trips" && method === "GET") {
+        const since = url.searchParams.get("since");
+        const limit = Math.min(Math.max(Number(url.searchParams.get("limit")) || 200, 1), 1000);
+        return json(this.listTrips({ since: since ? iso(since) : null, limit }));
+      }
+      if (path === "/trips/events" && method === "POST") {
+        return json(this.postEvents(await request.json()));
+      }
+      if (path === "/trips/sync" && method === "POST") {
+        return null; // handled by the Durable Object, which knows how to reach the container
+      }
+      const tripMatch = path.match(/^\/trips\/([^/]+)$/);
+      if (tripMatch && method === "DELETE") {
+        if (!this.deleteTrip(tripMatch[1])) return json({ detail: "No such trip" }, 404);
+        return json({ deleted: tripMatch[1] });
+      }
+      if (path === "/settings" && method === "GET") return json(this.getSettings());
+      if (path === "/settings" && method === "PUT") return json(this.putSettings(await request.json()));
+      if (path === "/phones" && method === "GET") return json(this.getPhones());
+      if (path === "/lease" && method === "POST") return json(this.lease(await request.json()));
+      if (["/trips", "/trips/events", "/settings", "/phones", "/lease"].includes(path) || tripMatch) {
+        return json({ detail: "Method not allowed" }, 405);
+      }
+      return null;
+    } catch (error) {
+      if (error instanceof HttpError) return json({ detail: error.message }, error.status);
+      if (error instanceof SyntaxError) return json({ detail: "Bad JSON body" }, 400);
+      throw error;
+    }
+  }
+}
+
+export class HttpError extends Error {
+  constructor(status, message) {
+    super(message);
+    this.status = status;
+  }
+}
+
+function json(body, status = 200) {
+  return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+}
+
+function snapshotFromRow(r) {
+  return {
+    at: r.at,
+    receivedAt: r.received_at,
+    odometerKm: r.odometer_km,
+    batteryPercent: r.battery_percent,
+    fuelPercent: r.fuel_percent,
+    rangeElectricKm: r.range_electric_km,
+    rangeFuelKm: r.range_fuel_km,
+    powerOn: Boolean(r.power_on),
+    charging: Boolean(r.charging),
+    source: r.source,
+  };
+}
+
+function tripFromRow(r) {
+  return {
+    id: r.id,
+    startAt: r.start_at,
+    endAt: r.end_at,
+    odoStart: r.odo_start,
+    odoEnd: r.odo_end,
+    socStart: r.soc_start,
+    socEnd: r.soc_end,
+    fuelStart: r.fuel_start,
+    fuelEnd: r.fuel_end,
+    km: round(r.odo_end - r.odo_start, 1),
+    kwh: r.kwh,
+    litres: r.litres,
+    evKm: r.ev_km,
+    petrolKm: r.petrol_km,
+    priceKwh: r.price_kwh,
+    priceLitre: r.price_litre,
+    petrolCycle: r.petrol_cycle,
+    phoneId: r.phone_id,
+    phoneName: r.phone_name ?? null,
+    startLocation: r.start_lat != null ? { lat: r.start_lat, lon: r.start_lon } : null,
+    endLocation: r.end_lat != null ? { lat: r.end_lat, lon: r.end_lon } : null,
+    flags: JSON.parse(r.flags || "[]"),
+    source: r.source,
+    deletedAt: r.deleted_at,
+    createdAt: r.created_at,
+  };
+}
+
+function publicTrip(t) {
+  const km = t.km;
+  const electricShare = km > 0 && t.evKm != null ? round(t.evKm / km, 3) : null;
+  const cost =
+    t.priceKwh != null && t.priceLitre != null && km > 0
+      ? (() => {
+          const total = Math.round((t.kwh ?? 0) * t.priceKwh + (t.litres ?? 0) * t.priceLitre);
+          return { total, perKm: Math.round(total / km), priceKwh: t.priceKwh, priceLitre: t.priceLitre, petrolCycle: t.petrolCycle };
+        })()
+      : null;
+  return {
+    id: t.id,
+    startAt: t.startAt,
+    endAt: t.endAt,
+    km,
+    odoStart: t.odoStart,
+    odoEnd: t.odoEnd,
+    socStart: t.socStart,
+    socEnd: t.socEnd,
+    fuelStart: t.fuelStart,
+    fuelEnd: t.fuelEnd,
+    kwh: t.kwh,
+    litres: t.litres,
+    evKm: t.evKm,
+    petrolKm: t.petrolKm,
+    electricShare,
+    cost,
+    phoneId: t.phoneId,
+    phoneName: t.phoneName,
+    startLocation: t.startLocation,
+    endLocation: t.endLocation,
+    flags: t.flags,
+    source: t.source,
+    deletedAt: t.deletedAt,
+  };
+}

@@ -3,6 +3,7 @@ import SwiftUI
 struct HomeView: View {
     @State private var model = CarViewModel()
     @State private var showingBluetooth = false
+    @State private var showingTrips = false
     @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
@@ -30,6 +31,9 @@ struct HomeView: View {
                 model.ble.connect()
                 model.runHandoff()
             }
+        }
+        .sheet(isPresented: $showingTrips) {
+            TripsSheet(store: model.trips, logger: model.tripLogger)
         }
         .sheet(isPresented: $showingBluetooth) {
             BluetoothSheet(link: model.ble, autoUnlock: model.autoUnlock, autoLock: model.autoLock, importing: model.importingKey) {
@@ -127,6 +131,8 @@ struct HomeView: View {
                     action: model.honk
                 )
             }
+
+            TripsCard(store: model.trips, drivingSince: model.tripLogger.drivingSince) { showingTrips = true }
 
             TyreCard(tyres: s.tyresBar, odometerKm: s.odometerKm)
         }

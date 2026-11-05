@@ -15,6 +15,14 @@ An unofficial iPhone app for BYD cars: see battery, range, locks, windows and ty
 </p>
 
 <p align="center">
+  <img src="docs/screenshots/trips-card.png" width="250" alt="Home screen with the Trips card: 76 km this month, 8.6 kWh and 1.8 L, 74kđ">
+  &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+  <img src="docs/screenshots/trips-sheet.png" width="250" alt="Trips sheet: a week of kilometres per day, electric over petrol, and the week's trips by day">
+  &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+  <img src="docs/screenshots/trips-detail.png" width="250" alt="Trip detail: 38 km, 2.6 kWh, 1.8 L, 52kđ, what the car reported and the cost at that day's prices">
+</p>
+
+<p align="center">
   <img src="docs/screenshots/widget.png" width="420" alt="Home Screen widget: battery 31%, 143 km, locked, with lock, trunk, A/C and honk buttons">
 </p>
 
@@ -23,6 +31,7 @@ An unofficial iPhone app for BYD cars: see battery, range, locks, windows and ty
 - **No Face ID check every time.** Open the app and tap; it doesn't ask you to verify yourself before each command.
 - **Trunk lock and unlock** from the phone.
 - **Auto-unlock over Bluetooth.** Walk up to the car and it unlocks, even with the app closed. See [Auto-unlock](#4-auto-unlock-optional).
+- **A trip and energy log.** Every drive with its distance, kWh, litres, electric share and cost per km, from the car's own reports. See [Trip log](#6-trip-log).
 - **Works without internet near the car.** Lock, unlock, trunk and honk go straight over Bluetooth, so they still work in an underground car park with no signal.
 - **Faster near the car.** A Bluetooth command takes about a second, instead of several through BYD's cloud.
 
@@ -69,6 +78,8 @@ npm run deploy
 
 The first deploy builds the container image and creates the Worker, the loop copies your credentials into its secrets, and the second deploy starts the container with them. It prints a fixed `https://byd-companion.….workers.dev` address: that's your `SERVER_URL`. A cron trigger pings the container every 5 minutes so it never goes to sleep.
 
+To ship a change, run `npm run deploy` again: it rebuilds the container image when `server.py` or `requirements.txt` changed and rolls out the Worker. The trip log's tables are created on first use, so no migration is needed.
+
 Logs: `npx wrangler tail` in `cloudflare/`. The server logs every push and poll with the age of the data.
 
 If **Trunk** or **Windows** fail with "Remote command … blocked … reason=function_no_missing" or "learn_info_missing", pyBYD is refusing to send them because BYD's feature list for your car doesn't advertise them. That data is often incomplete. Set `BYD_SKIP_COMMAND_GATE=1` (in `.env`, or in the `vars` of `cloudflare/wrangler.jsonc`) to send them anyway; the app then shows what BYD answers.
@@ -87,7 +98,42 @@ To run it on your Mac instead: `.venv/bin/uvicorn server:app --host 127.0.0.1 --
 | `stale` | `true` when a refresh was asked for and the car didn't answer with anything newer |
 | `powerOn`, `speedKmh`, `anyDoorOpen` | Whether the car is on, how fast it's going, and whether any door or the trunk is open; auto-lock checks these before locking |
 
+`GET /status` also returns `fuelPercent`, the fuel level in percent of the tank. It is `null` on cars that don't report it.
+
+Three more routes feed the trip log (the Cloudflare Worker pulls the first two on its 5-minute cron; all three need the token):
+
+| Route | Returns |
+| --- | --- |
+| `GET /snapshots?since=<iso8601>` | `{"snapshots": [{"at", "receivedAt", "odometerKm", "batteryPercent", "fuelPercent", "rangeElectricKm", "rangeFuelKm", "powerOn", "charging", "source"}], "serverStartedAt"}`: the last 300 changes of the car's state (a snapshot is kept whenever the car turns on or off, the odometer moves or charging starts or stops), ascending by `at`, after `since` when given. In memory only, so it empties when the container restarts. |
+| `GET /prices` | `{"petrol": {"product": "E10 RON 95-III", "zone": 1, "vndPerLitre", "source", "cycle", "fetchedAt", "stale"}, "electricityHint": {"tariffFrom", "vatPercent", "tiersVndPerKwh", "tierUpToKwh"}, "capacityHint": {"model", "batteryKwh", "tankLitres"}}`: the Petrolimex zone 1 price of the petrol the car takes, the EVN household tariff ladder as a hint, and the battery and tank sizes known for the model (`null` for unknown models). |
+| `GET /energy` | `{"last50km": {"evKwh", "petrolLitres", "avgEvKwhPer100km", "avgPetrolLPer100km", "electricSharePercent"}, "lifetime": {"avgEvKwhPer100km", "avgPetrolLPer100km", "totalMileageKm"}, "updatedAt"}`: BYD's own consumption figures, cached 10 minutes; 503 when BYD doesn't answer and nothing is cached yet. |
+
+The petrol price is scraped from [webgia.com](https://webgia.com/gia-xang-dau/) and, when that fails, from the [vietfuel-api](https://vietfuel-api.tranqui.workers.dev/api/fuel-prices/petrolimex) and [thiennhat-gia-xang-dau](https://github.com/thiennhatgroup/thiennhat-gia-xang-dau) JSON mirrors. It is checked every 6 hours, hourly on Thursday afternoons and evenings (Vietnam time) when the state adjusts prices; when every source fails the last good value is served with `stale: true`.
+
 `GET /status?refresh=true` asks the car for a new report and waits for one that is newer than what the cache had (up to about 25 seconds), so it never returns BYD's old cached snapshot. If the car doesn't answer, it returns the cache with `stale: true`. The server also asks the car for a report a few seconds after every command, and whenever nothing has arrived for `BYD_POLL_MINUTES` (default 15), so the cache never gets older than that while the car is reachable.
+
+### Trip log
+
+The Worker keeps a trip and energy log in the SQLite of the same Durable Object that hosts the container, so it survives container restarts and both phones read one log. Every 5 minutes the cron pulls the container's `/snapshots` (odometer, battery, fuel, power state at each change), `/prices` (the current petrol price and the car's battery and tank sizes) and, once an hour, `/energy` (BYD's last-50 km figures), then:
+
+- turns each power-on → power-off pair with at least 1 km into a trip (`source: "car"`), and an odometer jump between two power-off reports into a `coarse` trip;
+- works out km, kWh (battery drop × capacity), litres (fuel drop × tank), the electric and petrol km (a learnt kWh/km rate splits mixed trips), flags such as `chargedDuringTrip`, `refuelledDuringTrip` and `tooShortToMeasure`, and the cost at the prices in force when the trip closed (a petrol override in settings wins; no cost until a price per kWh is set);
+- attaches the phones' departure and arrival events to the trip they overlap (within 15 minutes), which gives the trip its phone, exact times and locations;
+- calibrates the battery and tank sizes from `/energy` against the percentage drops over the same 50 km, adopting a measured value after three readings within 10 % unless you set one by hand.
+
+Routes the Worker answers itself (same bearer token; everything else still goes to `server.py`):
+
+| Route | What it does |
+| --- | --- |
+| `GET /trips?since=&limit=` | Trips newest first, the open trip, settings, cached prices and `serverTime`. With `since`, soft-deleted trips are included (with `deletedAt`) so clients can drop them. |
+| `DELETE /trips/:id` | Soft-deletes a trip. |
+| `POST /trips/events` | `{"phoneId","phoneName","events":[{"kind":"departure"\|"arrival","at","lat","lon"}]}`; stores them, attaches what it can and answers `{"attached":n}`. Events with no trip yet are kept and attached at a later pull. |
+| `GET` / `PUT /settings` | `priceKwh`, `petrolOverrideVndPerLitre`, `batteryKwh`, `tankLitres`, `batterySource`, `tankSource` (`model`, `measured` or `manual`), `notifyOnTrip`. `PUT` merges; editing a capacity by hand marks it `manual`. |
+| `GET /phones` | The phones seen and the current leader. |
+| `POST /lease` | `{"phoneId","phoneName","kind":"car","ttlSeconds":120}` → `{"granted":bool,"leader":{...}}`. |
+| `POST /trips/sync` | What the cron runs: pull snapshots and prices now. Handy after `wrangler dev`. |
+
+**Two phones in the car.** The car holds one authenticated Bluetooth session at a time, so the phone that owns it is the leader and the only one that auto-unlocks, auto-locks and posts departure and arrival events. The lease only records that: the leader posts `POST /lease` when its link is ready and renews it on each signal tick; the Worker grants the lease to the first phone or the current holder and refuses other phones while it is live, so the other phone can show "Hieu's iPhone is driving" and stay quiet. With no internet the Bluetooth rule still decides on its own.
 
 ## 2. Build the app
 
@@ -114,7 +160,7 @@ The default icon is `ios/BYDCompanion/Assets.xcassets/AppIcon.appiconset/AppIcon
 1. Create `ios/BYDCompanion/Local.xcassets/MyIcon.appiconset/` (gitignored). Put a 1024×1024 PNG with no transparency in it, plus a `Contents.json` like the one next to the default icon.
 2. Set `APP_ICON_NAME = MyIcon` in `ios/Config.local.xcconfig`.
 
-The accent colour and other colours are in `ios/BYDCompanion/Theme.swift`.
+The accent colour and other colours are in `ios/Shared/Theme.swift`.
 
 ## 3. Bluetooth key (optional)
 
@@ -149,6 +195,17 @@ In the Bluetooth sheet, turn on **Lock as I walk away**. It needs no location ac
 - No auto-lock within 60 seconds of any Bluetooth command from the app or widget, so an unlock to grab something isn't undone straight away.
 
 It locks only when the phone that holds the key walks away. If you leave the phone in the car, nothing happens. Loading the trunk or sitting inside keeps the signal strong, so it doesn't lock. Like auto-unlock, it can't run after you force-quit the app. In demo mode (`-demo YES`), long-press **Signal now** in the Bluetooth sheet to step the pretend signal down and watch it work.
+
+## 6. Trip log
+
+The home screen's **Trips** card shows this month's distance, energy and cost; tap it for the log. Nothing to set up: the server derives trips from the car's own reports (a power-on to power-off pair with the odometer moving), so drives are logged even when no phone is in the car.
+
+- **What's logged.** For each trip: the time, odometer, battery and fuel percentages at departure and arrival, from which the app shows kilometres, kWh, litres, the electric share and, when prices are known, the cost and cost per km. Each trip keeps the prices of its day, so old trips never change. Trips too short for the car's percentages to move show no energy or cost.
+- **With the phone.** When the phone connects to the car over Bluetooth it tells the server it left, and when the link drops, that it arrived, with the car's location when known. The server attaches that to the trip: exact times and which phone drove. Events wait on the phone until it's online, and about ten minutes after a drive iOS lets the app fetch the finished trip in the background. Trips driven without any phone show a barred-phone glyph.
+- **Two phones.** Both read the same log. The phone connected to the car holds a short lease on it (renewed every 30 s) and is shown as driving; while another phone holds the lease, auto-unlock and auto-lock on this one stay quiet, so a passenger's phone never unlocks or locks the car. Each phone has a name, the device's by default, shown on the trips it drove.
+- **Settings** (the gear in the Trips sheet): your electricity price per kWh; the petrol price, fetched by the server from public Vietnamese sources (E10 RON 95-III, zone 1) with an override; the battery and tank sizes, seeded from the car model and editable; this phone's name; and a quiet notification when a trip is logged.
+
+All amounts are in thousand dong (`758kđ`, `1.8kđ/km`). In demo mode (`-demo YES`), **Simulate a trip** at the bottom of the trip settings drives the pretend car and logs the result.
 
 ## Regions and tested cars
 
