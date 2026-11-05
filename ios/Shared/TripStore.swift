@@ -56,6 +56,7 @@ final class TripStore {
             lastRefresh = response.serverTime ?? Date()
             errorMessage = nil
             save()
+        } catch is CancellationError {
         } catch {
             errorMessage = error.localizedDescription
         }
