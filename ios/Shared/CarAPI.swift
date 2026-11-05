@@ -70,8 +70,13 @@ struct CarAPI {
         let response: URLResponse
         do {
             (data, response) = try await URLSession.shared.data(for: request)
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch let error as URLError where error.code == .cancelled {
+            throw CancellationError()
         } catch {
-            throw ServerError(message: "Can't reach the server at \(request.url?.host() ?? "?"). Is server.py running?")
+            let host = request.url?.host() ?? "?"
+            throw ServerError(message: "Can't reach the server at \(host): \(error.localizedDescription)")
         }
 
         let code = (response as? HTTPURLResponse)?.statusCode ?? 0

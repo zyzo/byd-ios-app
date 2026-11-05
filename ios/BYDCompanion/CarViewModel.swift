@@ -39,6 +39,8 @@ final class CarViewModel {
             StatusCache.save(status)
             errorMessage = nil
             WidgetCenter.shared.reloadAllTimelines()
+        } catch is CancellationError {
+            // SwiftUI cancels the view's load when it goes away or a refresh replaces it: not an error.
         } catch {
             errorMessage = error.localizedDescription
         }
