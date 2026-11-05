@@ -126,9 +126,23 @@ test("odometer jump between two power-off reports becomes a coarse trip", () => 
   assert.equal(trips[0].startAt, at(0));
   assert.equal(trips[0].endAt, at(120));
   assert.equal(computeTrip(trips[0], settings).km, 35);
-  // A jump that shows up on the next power-on is also caught, then the normal trip follows.
-  const batch = deriveTrips([snap(0, 1000, 60, 50, false), snap(120, 1035, 40, 50, true), snap(150, 1050, 30, 50, false)]);
-  assert.deepEqual(batch.trips.map((t) => [t.source, t.odoStart, t.odoEnd]), [["coarse", 1000, 1035], ["car", 1035, 1050]]);
+});
+
+test("kilometres before a late power-on report belong to the trip it opens", () => {
+  const { trips } = deriveTrips([snap(0, 1000, 60, 50, false), snap(120, 1035, 40, 49, true), snap(150, 1050, 30, 48, false)]);
+  assert.equal(trips.length, 1);
+  const [trip] = trips;
+  assert.deepEqual([trip.source, trip.odoStart, trip.odoEnd, trip.socStart, trip.fuelStart], ["car", 1000, 1050, 60, 50]);
+  assert.equal(trip.startAt, at(120));
+  assert.equal(trip.gapStartAt, at(0));
+});
+
+test("a hybrid's battery rising while driving is not charging", () => {
+  const { trips } = deriveTrips([snap(0, 1000, 34, 6, true), snap(17, 1002, 36, 5, false)]);
+  const trip = computeTrip(trips[0], settings, prices);
+  assert.ok(!trip.flags.includes("chargedDuringTrip"));
+  assert.equal(trip.kwh, 0);
+  assert.equal(trip.litres, 0.6);
 });
 
 test("no cost without both prices", () => {
@@ -184,8 +198,42 @@ test("two phones with overlapping events each attach to their own trip", () => {
 test("events farther than 15 minutes from any trip stay unattached", () => {
   const trips = [{ id: "t1", startAt: at(0), endAt: at(30), phoneId: null, flags: [] }];
   const result = attachEvents(trips, [{ id: 1, phoneId: "A", kind: "arrival", at: at(50) }]);
-  assert.equal(result.trips.length, 0);
+  assert.equal(result.attachments.length, 0);
   assert.equal(result.unattached.length, 1);
+  assert.deepEqual(result.trips[0].flags, ["withoutPhone"]);
+});
+
+test("rematching uses the car's times, so a later event never drags an end further", () => {
+  const trips = [{ id: "t1", startAt: at(0), endAt: at(30), carStartAt: at(0), carEndAt: at(30), phoneId: null, flags: [] }];
+  const events = [
+    { id: 1, phoneId: "A", kind: "departure", at: at(-5) },
+    { id: 2, phoneId: "A", kind: "departure", at: at(10) }, // link came back mid-trip
+  ];
+  const first = attachEvents(trips, events);
+  assert.equal(first.trips[0].startAt, at(-5));
+  // Run again on the stored, already-adjusted trip: the start stays put.
+  const again = attachEvents(first.trips, events.map((e) => ({ ...e, tripId: e.id === 1 ? "t1" : null })));
+  assert.equal(again.trips[0].startAt, at(-5));
+});
+
+test("link flapping while parking resolves to the last arrival and no departure", () => {
+  const trips = [
+    { id: "t1", startAt: at(0), endAt: at(30), phoneId: null, flags: [] },
+    { id: "t2", startAt: at(200), endAt: at(220), gapStartAt: at(30), phoneId: null, flags: [] },
+  ];
+  const events = [
+    { id: 1, phoneId: "A", kind: "departure", at: at(1) },
+    { id: 2, phoneId: "A", kind: "arrival", at: at(28) },
+    { id: 3, phoneId: "A", kind: "departure", at: at(29) }, // walking past the car
+    { id: 4, phoneId: "A", kind: "arrival", at: at(29.5) },
+    { id: 5, phoneId: "A", kind: "departure", at: at(160) }, // real start, before the late report
+    { id: 6, phoneId: "A", kind: "arrival", at: at(215) },
+  ];
+  const result = attachEvents(trips, events);
+  const [t1, t2] = result.trips;
+  assert.deepEqual([t1.startAt, t1.endAt], [at(1), at(29.5)]);
+  assert.deepEqual([t2.startAt, t2.endAt], [at(160), at(215)]);
+  assert.deepEqual(result.unattached.map((e) => e.id), [2, 3]);
 });
 
 test("calibration adopts a measured capacity after three readings within 10 %", () => {
@@ -214,8 +262,8 @@ test("calibration adopts a measured capacity after three readings within 10 %", 
 
 test("migrations are idempotent", () => {
   const sql = memorySql();
-  assert.equal(migrate(sql), 1);
-  assert.equal(migrate(sql), 1);
+  assert.equal(migrate(sql), 2);
+  assert.equal(migrate(sql), 2);
   const tables = sql.exec(`SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name`).toArray().map((r) => r.name);
   for (const name of ["snapshots", "trips", "phone_events", "phones", "settings", "leases", "schema_version"]) {
     assert.ok(tables.includes(name), name);
@@ -315,6 +363,53 @@ test("sync pulls snapshots and prices, seeds capacity, derives and prices trips,
   const withSince = store.listTrips({ since: at(0) });
   assert.equal(withSince.trips.length, 1);
   assert.ok(withSince.trips[0].deletedAt);
+});
+
+test("upgrading from v1 re-cuts 5 Nov 2026: two drives, the second reported 36 minutes late", async () => {
+  const utc = (h, m, s = 0) => new Date(Date.UTC(2026, 10, 5, h - 7, m, s)).toISOString(); // Vietnam time
+  const car = (time, odometerKm, batteryPercent, fuelPercent, powerOn) => ({
+    ...snap(0, odometerKm, batteryPercent, fuelPercent, powerOn),
+    at: time,
+    receivedAt: time,
+  });
+  const snapshots = [
+    car(new Date(Date.UTC(2026, 10, 4, 15, 39, 15)).toISOString(), 3776, 27, 8, false),
+    car(utc(16, 49, 34), 3778, 27, 7, true),
+    car(utc(17, 4, 56), 3782, 30, 7, true),
+    car(utc(17, 14, 51), 3784, 32, 6, false),
+    car(utc(20, 40, 26), 3788, 34, 6, true),
+    car(utc(20, 57, 14), 3790, 36, 5, false),
+  ];
+  const sql = memorySql();
+  const now = () => new Date(utc(21, 30));
+  const store = new TripStore(sql, { now });
+  store.insertSnapshots(snapshots);
+  store.postEvents({
+    phoneId: "A",
+    events: [
+      { kind: "departure", at: utc(16, 48) },
+      { kind: "departure", at: utc(17, 14, 23) },
+      { kind: "arrival", at: utc(17, 14, 31) },
+      { kind: "departure", at: utc(20, 4) },
+      { kind: "arrival", at: utc(20, 49, 15) },
+    ],
+  });
+  // A trip from the old cut, which the rebuild replaces.
+  store.insertTrip(computeTrip({ id: "old", startAt: utc(17, 14, 51), endAt: utc(20, 40, 26), odoStart: 3784, odoEnd: 3788 }));
+
+  // Back to v1, as the live store was before this change, then open it again.
+  for (const column of ["car_start_at", "car_end_at", "gap_start_at"]) sql.exec(`ALTER TABLE trips DROP COLUMN ${column}`);
+  sql.exec(`UPDATE schema_version SET version = 1`);
+  const upgraded = new TripStore(sql, { now });
+  const trips = upgraded.listTrips().trips.reverse();
+  assert.deepEqual(
+    trips.map((t) => [t.startAt, t.endAt, t.odoStart, t.odoEnd, t.phoneId, t.flags]),
+    [
+      [utc(16, 48), utc(17, 14, 31), 3776, 3784, "A", []],
+      [utc(20, 4), utc(20, 49, 15), 3784, 3790, "A", []],
+    ],
+  );
+  assert.ok(upgraded.listTrips({ since: utc(21, 0) }).trips.find((t) => t.id === "old").deletedAt);
 });
 
 test("settings: PUT merges, manual capacity edits set the source", () => {

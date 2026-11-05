@@ -11,7 +11,7 @@ export const CALIBRATION_TOLERANCE = 0.1;
 const ENERGY_INTERVAL_MS = 60 * 60 * 1000;
 const EVENT_RETENTION_DAYS = 7;
 
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 
 const MIGRATIONS = [
   // v1
@@ -81,7 +81,20 @@ const MIGRATIONS = [
     until TEXT NOT NULL
   );
   `,
+  // v2: the car's own start and end, kept apart from the phone-adjusted ones so events can be
+  // re-matched at any time, and where a gap folded into the trip began.
+  `
+  ALTER TABLE trips ADD COLUMN car_start_at TEXT;
+  ALTER TABLE trips ADD COLUMN car_end_at TEXT;
+  ALTER TABLE trips ADD COLUMN gap_start_at TEXT;
+  UPDATE trips SET car_start_at = start_at, car_end_at = end_at;
+  `,
 ];
+
+function storedVersion(sql) {
+  const table = sql.exec(`SELECT 1 AS x FROM sqlite_master WHERE type = 'table' AND name = 'schema_version'`).toArray();
+  return table.length ? (sql.exec(`SELECT version FROM schema_version`).toArray()[0]?.version ?? 0) : 0;
+}
 
 // Runs every migration past the stored version. Safe to call on every request.
 export function migrate(sql) {
@@ -128,6 +141,7 @@ export function normaliseSnapshot(raw) {
 function openFrom(snapshot) {
   return {
     startAt: snapshot.at,
+    gapStartAt: null,
     odoStart: snapshot.odometerKm,
     socStart: snapshot.batteryPercent,
     fuelStart: snapshot.fuelPercent,
@@ -136,11 +150,26 @@ function openFrom(snapshot) {
   };
 }
 
+// A power-on report that arrives with more kilometres than the last power-off one: the car
+// reported late and the drive began somewhere in between. The trip takes the odometer, battery
+// and fuel from that power-off report and remembers where the gap began, so a phone departure
+// inside the gap can give it its real start.
+function openAfterGap(prev, snapshot) {
+  return {
+    ...openFrom(snapshot),
+    gapStartAt: prev.at,
+    odoStart: prev.odometerKm,
+    socStart: prev.batteryPercent,
+    fuelStart: prev.fuelPercent,
+  };
+}
+
 function closeTrip(open, snapshot, source) {
   return {
     id: crypto.randomUUID(),
     startAt: open.startAt,
     endAt: snapshot.at,
+    gapStartAt: open.gapStartAt ?? null,
     odoStart: open.odoStart,
     odoEnd: snapshot.odometerKm,
     socStart: open.socStart,
@@ -154,9 +183,10 @@ function closeTrip(open, snapshot, source) {
 
 // Walks snapshots (ascending by `at`) and turns power-on → power-off pairs into trips.
 // `openTrip` is the trip still in progress from the previous run (or null); `prev` is the last
-// snapshot seen before this batch, used to spot odometer jumps between two power-off reports
-// (a drive the pushes missed), which become `coarse` trips. Returns the closed trips and the
-// new cursor so the caller can resume from exactly here next time.
+// snapshot seen before this batch. Kilometres driven before a late power-on report belong to
+// the trip it opens; an odometer jump between two power-off reports (a drive the pushes missed
+// entirely) becomes a `coarse` trip. Returns the closed trips and the new cursor so the caller
+// can resume from exactly here next time.
 export function deriveTrips(snapshots, openTrip = null, prev = null) {
   const trips = [];
   let open = openTrip;
@@ -171,11 +201,8 @@ export function deriveTrips(snapshots, openTrip = null, prev = null) {
         open = null;
       }
     } else if (snapshot.powerOn) {
-      open = openFrom(snapshot);
-      // Distance already driven between the last power-off report and this power-on one.
-      if (prev && !prev.powerOn && snapshot.odometerKm - prev.odometerKm >= 1) {
-        trips.push(closeTrip(openFrom(prev), snapshot, "coarse"));
-      }
+      const late = prev && !prev.powerOn && snapshot.odometerKm - prev.odometerKm >= 1;
+      open = late ? openAfterGap(prev, snapshot) : openFrom(snapshot);
     } else if (prev && snapshot.odometerKm - prev.odometerKm >= 1) {
       trips.push(closeTrip(openFrom(prev), snapshot, "coarse"));
     }
@@ -204,7 +231,9 @@ export function computeTrip(trip, settings = {}, prices = null) {
   const litres = fuelDelta == null ? 0 : round((Math.max(0, fuelDelta) / 100) * tankLitres);
 
   const flags = [];
-  if (trip.chargedSeen || (socDelta != null && socDelta < 0)) flags.push("chargedDuringTrip");
+  // Only the car's charging flag counts: on a hybrid the engine tops the battery up while
+  // driving, so a higher SoC at arrival is normal.
+  if (trip.chargedSeen) flags.push("chargedDuringTrip");
   if (fuelDelta != null && fuelDelta < 0) flags.push("refuelledDuringTrip");
   if (km > 0 && socDelta === 0 && (fuelDelta === 0 || fuelDelta == null)) flags.push("tooShortToMeasure");
   if (!trip.phoneId) flags.push("withoutPhone");
@@ -245,63 +274,92 @@ export function computeTrip(trip, settings = {}, prices = null) {
   };
 }
 
-function near(a, b) {
-  return Math.abs(ms(a) - ms(b)) <= EVENT_WINDOW_MS;
+const carStart = (trip) => trip.carStartAt ?? trip.startAt;
+
+// Picks one phone's departure for a trip: the earliest one in the window that the phone did
+// not follow with an arrival before the car's own start, so a link that drops and comes back
+// while walking past the parked car does not count.
+function pickDeparture(events, free, from, to, startMs) {
+  return free.find(
+    (e) =>
+      e.kind === "departure" &&
+      ms(e.at) >= from &&
+      ms(e.at) <= to &&
+      !events.some((later) => later.kind === "arrival" && ms(later.at) > ms(e.at) && ms(later.at) < startMs),
+  );
 }
 
-// Matches each phone's departure/arrival events to trips: a departure within 15 minutes of a
-// trip's start (or inside the trip) sets its phone and exact start; an arrival likewise its end.
-// Returns the trips that changed and which events were attached; the rest stay for a later run.
+// And its arrival: the last one in the window before the phone's next departure after the car's
+// end, so the link flapping while parking resolves to the moment the phone finally left.
+function pickArrival(events, free, from, to, endMs) {
+  const next = events.find((e) => e.kind === "departure" && ms(e.at) > endMs);
+  const limit = next ? Math.min(to, ms(next.at)) : to;
+  return free.filter((e) => e.kind === "arrival" && ms(e.at) >= from && ms(e.at) <= limit).at(-1);
+}
+
+// Matches the phones' departure/arrival events to trips, from the car's own times every time so
+// it can be rerun as events come in. A departure within 15 minutes of the car's start (or
+// inside the gap the trip folded in) sets the trip's phone and start; an arrival within 15
+// minutes of the car's end sets its end. A coarse trip takes events from between its two
+// reports. Events already attached to another trip than the ones given are left alone.
+// Returns every trip with its phone fields recomputed, and which event went to which trip.
 export function attachEvents(trips, events) {
   const attachments = [];
-  const changed = new Map();
-  const candidates = trips.filter((t) => !t.deletedAt);
-  const sorted = [...events].sort((a, b) => ms(a.at) - ms(b.at));
+  const taken = new Set();
+  const ids = new Set(trips.map((t) => t.id));
+  const sorted = [...events].filter((e) => !e.tripId || ids.has(e.tripId)).sort((a, b) => ms(a.at) - ms(b.at));
+  const phones = [...new Set(sorted.map((e) => e.phoneId))];
+  const candidates = trips.filter((t) => !t.deletedAt).sort((a, b) => ms(carStart(a)) - ms(carStart(b)));
+  const result = [];
 
   for (const trip of candidates) {
-    const startMs = ms(trip.startAt);
-    const endMs = ms(trip.endAt);
-    const inside = (at) => ms(at) >= startMs - EVENT_WINDOW_MS && ms(at) <= endMs + EVENT_WINDOW_MS;
-    const byPhone = new Map();
-    for (const event of sorted) {
-      if (event.tripId || !inside(event.at)) continue;
-      if (trip.phoneId && event.phoneId !== trip.phoneId) continue;
-      const fits = event.kind === "departure" ? near(event.at, trip.startAt) : near(event.at, trip.endAt);
-      if (!fits) continue;
-      const slot = byPhone.get(event.phoneId) ?? {};
-      if (!slot[event.kind]) slot[event.kind] = event;
-      byPhone.set(event.phoneId, slot);
+    const start = ms(carStart(trip));
+    const end = ms(trip.carEndAt ?? trip.endAt);
+    const coarse = trip.source === "coarse";
+    const departFrom = coarse ? start : trip.gapStartAt ? ms(trip.gapStartAt) : start - EVENT_WINDOW_MS;
+    const departTo = coarse ? end : start + EVENT_WINDOW_MS;
+    const arriveFrom = Math.max(coarse ? start : end - EVENT_WINDOW_MS, start);
+    const arriveTo = end + EVENT_WINDOW_MS;
+
+    const matches = [];
+    for (const phoneId of phones) {
+      const own = sorted.filter((e) => e.phoneId === phoneId);
+      const free = own.filter((e) => !taken.has(e));
+      const departure = pickDeparture(own, free, departFrom, departTo, start);
+      const arrival = pickArrival(own, free, Math.max(arriveFrom, departure ? ms(departure.at) : 0), arriveTo, end);
+      if (departure || arrival) matches.push({ phoneId, departure, arrival });
     }
-    if (!byPhone.size) continue;
-    // The phone with both ends matched wins; among equals, the earliest departure.
-    const [phoneId, slot] = [...byPhone.entries()].sort((a, b) => {
-      const score = (s) => (s.departure ? 1 : 0) + (s.arrival ? 1 : 0);
-      const diff = score(b[1]) - score(a[1]);
-      if (diff) return diff;
-      return ms(a[1].departure?.at ?? a[1].arrival.at) - ms(b[1].departure?.at ?? b[1].arrival.at);
-    })[0];
-    const updated = { ...trip, phoneId };
-    if (slot.departure) {
-      updated.startAt = iso(slot.departure.at);
-      if (isNumber(slot.departure.lat) && isNumber(slot.departure.lon)) {
-        updated.startLocation = { lat: slot.departure.lat, lon: slot.departure.lon };
-      }
-      slot.departure.tripId = trip.id;
-      attachments.push({ eventId: slot.departure.id, tripId: trip.id });
+    // The phone with both ends matched wins; among equals, the earliest event.
+    const score = (m) => (m.departure ? 1 : 0) + (m.arrival ? 1 : 0);
+    const first = (m) => ms((m.departure ?? m.arrival).at);
+    matches.sort((a, b) => score(b) - score(a) || first(a) - first(b));
+    const match = matches[0];
+
+    const updated = {
+      ...trip,
+      startAt: carStart(trip),
+      endAt: trip.carEndAt ?? trip.endAt,
+      phoneId: match?.phoneId ?? null,
+      startLocation: null,
+      endLocation: null,
+    };
+    for (const [event, side] of [
+      [match?.departure, "start"],
+      [match?.arrival, "end"],
+    ]) {
+      if (!event) continue;
+      updated[`${side}At`] = iso(event.at);
+      if (isNumber(event.lat) && isNumber(event.lon)) updated[`${side}Location`] = { lat: event.lat, lon: event.lon };
+      taken.add(event);
+      attachments.push({ eventId: event.id, tripId: trip.id });
     }
-    if (slot.arrival) {
-      updated.endAt = iso(slot.arrival.at);
-      if (isNumber(slot.arrival.lat) && isNumber(slot.arrival.lon)) {
-        updated.endLocation = { lat: slot.arrival.lat, lon: slot.arrival.lon };
-      }
-      slot.arrival.tripId = trip.id;
-      attachments.push({ eventId: slot.arrival.id, tripId: trip.id });
-    }
-    updated.flags = (updated.flags ?? []).filter((f) => f !== "withoutPhone");
-    changed.set(trip.id, updated);
+    const flags = (trip.flags ?? []).filter((f) => f !== "withoutPhone");
+    if (!updated.phoneId) flags.push("withoutPhone");
+    updated.flags = flags;
+    result.push(updated);
   }
-  const unattached = sorted.filter((e) => !e.tripId);
-  return { trips: [...changed.values()], attachments, unattached };
+  const unattached = sorted.filter((e) => !taken.has(e));
+  return { trips: result, attachments, unattached };
 }
 
 // Percent consumed between consecutive snapshots, ignoring increases (charging, refuelling).
@@ -396,7 +454,10 @@ export class TripStore {
   constructor(sql, { now = () => new Date() } = {}) {
     this.sql = sql;
     this.now = now;
+    const from = storedVersion(sql);
     migrate(sql);
+    // Up to v1, kilometres the car reported late became trips of their own: cut them again once.
+    if (from === 1) this.rebuild();
   }
 
   rows(query, ...bindings) {
@@ -498,8 +559,8 @@ export class TripStore {
     this.run(
       `INSERT INTO trips (id, start_at, end_at, odo_start, odo_end, soc_start, soc_end, fuel_start, fuel_end,
          kwh, litres, ev_km, petrol_km, price_kwh, price_litre, petrol_cycle, phone_id, start_lat, start_lon,
-         end_lat, end_lon, flags, source, deleted_at, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)`,
+         end_lat, end_lon, flags, source, deleted_at, created_at, car_start_at, car_end_at, gap_start_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       trip.id,
       trip.startAt,
       trip.endAt,
@@ -523,7 +584,11 @@ export class TripStore {
       trip.endLocation?.lon ?? null,
       JSON.stringify(trip.flags ?? []),
       trip.source ?? "car",
+      trip.deletedAt ?? null,
       this.now().toISOString(),
+      trip.carStartAt ?? trip.startAt,
+      trip.carEndAt ?? trip.endAt,
+      trip.gapStartAt ?? null,
     );
   }
 
@@ -629,21 +694,62 @@ export class TripStore {
     return { attached: this.attachPendingEvents() };
   }
 
+  // Re-matches every recent event to every recent trip, so a late event can still move a
+  // trip's ends or hand it to another phone. Only rows whose outcome changed are written.
   attachPendingEvents() {
     const horizon = new Date(this.now().getTime() - EVENT_RETENTION_DAYS * 86400000).toISOString();
-    const events = this.rows(`SELECT * FROM phone_events WHERE trip_id IS NULL AND at >= ? ORDER BY at`, horizon).map(
-      (r) => ({ id: r.id, phoneId: r.phone_id, kind: r.kind, at: r.at, lat: r.lat, lon: r.lon, tripId: null }),
-    );
-    if (!events.length) return 0;
+    const events = this.rows(`SELECT * FROM phone_events WHERE at >= ? ORDER BY at`, horizon).map((r) => ({
+      id: r.id,
+      phoneId: r.phone_id,
+      kind: r.kind,
+      at: r.at,
+      lat: r.lat,
+      lon: r.lon,
+      tripId: r.trip_id,
+    }));
     const trips = this.rows(`SELECT * FROM trips WHERE deleted_at IS NULL AND end_at >= ? ORDER BY start_at`, horizon).map(
       tripFromRow,
     );
+    if (!trips.length) return 0;
     const result = attachEvents(trips, events);
-    for (const trip of result.trips) this.updateTripAttachment(trip);
+    const before = new Map(trips.map((t) => [t.id, t]));
+    const fields = (t) =>
+      JSON.stringify([t.startAt, t.endAt, t.phoneId ?? null, t.startLocation ?? null, t.endLocation ?? null, t.flags]);
+    for (const trip of result.trips) {
+      if (fields(trip) !== fields(before.get(trip.id))) this.updateTripAttachment(trip);
+    }
+    const ids = [...before.keys()];
+    this.run(
+      `UPDATE phone_events SET trip_id = NULL WHERE trip_id IN (${ids.map(() => "?").join(", ")})`,
+      ...ids,
+    );
+    const previous = new Map(events.map((e) => [e.id, e.tripId]));
+    let moved = 0;
     for (const { eventId, tripId } of result.attachments) {
       this.run(`UPDATE phone_events SET trip_id = ? WHERE id = ?`, tripId, eventId);
+      if (previous.get(eventId) !== tripId) moved += 1;
     }
-    return result.attachments.length;
+    return moved;
+  }
+
+  // Derives every trip again from the stored snapshots, after a change to how trips are cut.
+  // The old rows are soft-deleted so the app drops them on its next refresh; a new trip that
+  // ends where one the person deleted ended stays deleted.
+  rebuild() {
+    const now = this.now().toISOString();
+    const deletedEnds = new Set(
+      this.rows(`SELECT odo_end FROM trips WHERE deleted_at IS NOT NULL`).map((r) => r.odo_end),
+    );
+    const replaced = this.rows(`SELECT COUNT(*) AS n FROM trips WHERE deleted_at IS NULL`)[0].n;
+    this.run(`UPDATE trips SET deleted_at = ? WHERE deleted_at IS NULL`, now);
+    this.run(`UPDATE phone_events SET trip_id = NULL`);
+    this.setSetting("_cursor", {});
+    const trips = this.deriveNewTrips();
+    for (const odoEnd of deletedEnds) {
+      this.run(`UPDATE trips SET deleted_at = ? WHERE deleted_at IS NULL AND odo_end = ?`, now, odoEnd);
+    }
+    const attached = this.attachPendingEvents();
+    return { replaced, trips, attached };
   }
 
   getPhones() {
@@ -865,6 +971,9 @@ function tripFromRow(r) {
     source: r.source,
     deletedAt: r.deleted_at,
     createdAt: r.created_at,
+    carStartAt: r.car_start_at ?? r.start_at,
+    carEndAt: r.car_end_at ?? r.end_at,
+    gapStartAt: r.gap_start_at,
   };
 }
 
