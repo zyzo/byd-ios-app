@@ -58,6 +58,15 @@ struct CarAPI {
         let _: Empty = try await send(request)
     }
 
+    /// Saves what a refuel or a charge really came to; nil for both goes back to the estimate.
+    func editRefill(_ tripId: String, kind: Refill.Kind, amount: Double?, cost: Double?) async throws -> Trip? {
+        if AppConfig.demo { return nil }
+        struct Body: Encodable { var kind: Refill.Kind; var amount: Double?; var cost: Double? }
+        var request = try post("trips/\(tripId)/refill", Body(kind: kind, amount: amount, cost: cost))
+        request.httpMethod = "PUT"
+        return try await send(request)
+    }
+
     func postEvents(_ events: [PhoneEvent]) async throws {
         if AppConfig.demo { return }
         let body = PhoneEventsBody(phoneId: PhoneIdentity.id, phoneName: PhoneIdentity.name, events: events)
