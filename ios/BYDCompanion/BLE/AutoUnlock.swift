@@ -245,11 +245,27 @@ enum CarNotifications {
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .provisional]) { _, _ in }
     }
 
-    static func post(_ body: String) {
+    static let leftUnlockedCategory = "left-unlocked"
+    static let lockAction = "lock"
+
+    /// Registers the Lock button that `postLeftUnlocked` offers.
+    static func registerActions() {
+        let lock = UNNotificationAction(identifier: lockAction, title: "Lock")
+        let category = UNNotificationCategory(identifier: leftUnlockedCategory, actions: [lock], intentIdentifiers: [])
+        UNUserNotificationCenter.current().setNotificationCategories([category])
+    }
+
+    static func post(_ body: String, category: String? = nil) {
         let content = UNMutableNotificationContent()
         content.title = AppConfig.displayName
         content.body = body
+        if let category { content.categoryIdentifier = category }
         UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil))
+    }
+
+    /// Long-press (or expand) it for a Lock button, which locks through the cloud.
+    static func postLeftUnlocked(_ body: String) {
+        post(body, category: leftUnlockedCategory)
     }
 }
 

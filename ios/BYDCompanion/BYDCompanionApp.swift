@@ -1,5 +1,6 @@
 import SwiftUI
 import UIKit
+import UserNotifications
 
 @main
 struct BYDCompanionApp: App {
@@ -38,9 +39,35 @@ final class AppServices {
     }
 }
 
-final class AppDelegate: NSObject, UIApplicationDelegate {
+final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDelegate {
     func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
         _ = AppServices.shared
+        UNUserNotificationCenter.current().delegate = self
+        CarNotifications.registerActions()
         return true
+    }
+
+    func applicationDidEnterBackground(_ application: UIApplication) {
+        AppServices.shared.ble.note("App went to the background")
+    }
+
+    func applicationWillEnterForeground(_ application: UIApplication) {
+        AppServices.shared.ble.note("App came to the foreground")
+    }
+
+    /// The Lock button on a left-unlocked notification: lock through the cloud, then say how it went.
+    @MainActor
+    func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse) async {
+        guard response.actionIdentifier == CarNotifications.lockAction else { return }
+        let link = AppServices.shared.ble
+        link.note("Lock tapped on the left-unlocked notification")
+        do {
+            let confirmed = try await CarAPI().run(.lock)
+            link.note("Cloud lock \(confirmed ? "confirmed" : "sent, not confirmed")")
+            CarNotifications.post(confirmed ? "Locked." : "Sent lock, but BYD didn't confirm it. Check the car.")
+        } catch {
+            link.note("Cloud lock failed: \(error.localizedDescription)")
+            CarNotifications.post("Couldn't lock the car: \(error.localizedDescription)")
+        }
     }
 }

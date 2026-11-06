@@ -1,6 +1,7 @@
 import CoreBluetooth
 import Foundation
 import Observation
+import os
 import WidgetKit
 
 /// Direct Bluetooth link to the car using the dkey protocol (see BleCodec.swift).
@@ -54,7 +55,7 @@ final class BleCarLink: NSObject {
         didSet { publishReady() }
     }
     private(set) var hasKey = false
-    /// Recent events, newest last, for troubleshooting.
+    /// Recent events, newest last, for troubleshooting. Also kept in `LinkLogFile` and the system log.
     private(set) var log: [String] = []
     /// Latest signal strength from the car, in dBm, while connected.
     private(set) var rssi: Int?
@@ -87,6 +88,12 @@ final class BleCarLink: NSObject {
     private static let notifyID = CBUUID(string: BleCodec.notifyUUID)
     private static let savedPeripheralKey = "ble.peripheral.id"
     private static let restoreID = "car-link"
+    private static let logger = Logger(subsystem: "byd-companion", category: "car-link")
+    private static let logTime: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "MM-dd HH:mm:ss"
+        return formatter
+    }()
     /// The signal `readRSSI()` reports in demo mode (dBm).
     var demoSignal = -58
 
@@ -101,6 +108,7 @@ final class BleCarLink: NSObject {
             log = DemoCar.log
             return
         }
+        log = LinkLogFile.recent(60)
         key = BleKeyStore.load()
         hasKey = key != nil
         // The restore identifier lets iOS relaunch the app in the background for the car.
@@ -353,8 +361,11 @@ final class BleCarLink: NSObject {
     }
 
     func note(_ message: String) {
-        log.append(message)
+        Self.logger.notice("\(message, privacy: .public)")
+        let line = "\(Self.logTime.string(from: Date())) \(message)"
+        log.append(line)
         if log.count > 60 { log.removeFirst(log.count - 60) }
+        if !AppConfig.demo { LinkLogFile.append(line) }
     }
 }
 
@@ -501,5 +512,35 @@ private extension Array where Element == UInt8 {
     func contains(subsequence: [UInt8]) -> Bool {
         guard !subsequence.isEmpty, subsequence.count <= count else { return false }
         return (0...(count - subsequence.count)).contains { Array(self[$0..<$0 + subsequence.count]) == subsequence }
+    }
+}
+
+/// The link's events on disk, so they survive the app being closed. Read it off the phone with
+/// `xcrun devicectl device copy from --device <udid> --domain-type appDataContainer
+/// --domain-identifier <bundle id> --source Documents/link-log.txt --destination link-log.txt`.
+enum LinkLogFile {
+    private static let maxBytes = 512 * 1024
+    private static let url = URL.documentsDirectory.appending(path: "link-log.txt")
+
+    static func append(_ line: String) {
+        let data = Data((line + "\n").utf8)
+        guard let handle = try? FileHandle(forWritingTo: url) else {
+            try? data.write(to: url)
+            return
+        }
+        defer { try? handle.close() }
+        _ = try? handle.seekToEnd()
+        try? handle.write(contentsOf: data)
+    }
+
+    /// The last `count` lines. Halves the file first when it has grown past its cap.
+    static func recent(_ count: Int) -> [String] {
+        guard let data = try? Data(contentsOf: url) else { return [] }
+        var lines = String(decoding: data, as: UTF8.self).split(separator: "\n").map(String.init)
+        if data.count > maxBytes {
+            lines.removeFirst(lines.count / 2)
+            try? Data(lines.map { $0 + "\n" }.joined().utf8).write(to: url, options: .atomic)
+        }
+        return Array(lines.suffix(count))
     }
 }

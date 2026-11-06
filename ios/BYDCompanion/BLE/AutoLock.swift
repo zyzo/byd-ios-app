@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import UIKit
 
 /// Locks the car over Bluetooth as you walk away from it.
 ///
@@ -7,6 +8,10 @@ import Observation
 /// at the car; when it then stays below for a few seconds, one lock goes out over Bluetooth
 /// (never the cloud). If the link drops first, it locks on reconnect within two minutes.
 /// A fresh server report saying the car is on, moving or open vetoes the lock.
+///
+/// iOS suspends the app in the background, which stops the signal readings, so a walk-away
+/// is often never seen. Whenever the link drops without a lock this visit, the app asks the
+/// server whether the car was left unlocked and, if so, posts a notification with a Lock button.
 @MainActor
 @Observable
 final class AutoLock {
@@ -18,6 +23,16 @@ final class AutoLock {
         case done
         /// Link dropped while leaving; locks if it comes back by then.
         case awaitingReconnect(until: Date)
+
+        var name: String {
+            switch self {
+            case .idle: "waiting"
+            case .near: "at the car"
+            case .leaving: "leaving"
+            case .done: "done"
+            case .awaitingReconnect: "awaiting reconnect"
+            }
+        }
     }
 
     static let defaultDistance = 300
@@ -31,6 +46,10 @@ final class AutoLock {
     /// A server report older than this can't veto a lock.
     private static let statusFreshness: TimeInterval = 5 * 60
     private static let statusTimeout: TimeInterval = 3
+    /// How long the left-unlocked check waits for the car's own report; iOS allows about 30 s.
+    private static let refreshTimeout: TimeInterval = 20
+    /// One left-unlocked notification per this long.
+    private static let leftUnlockedQuiet: TimeInterval = 10 * 60
 
     private enum Keys {
         static let wanted = "autoLock.wanted"
@@ -57,6 +76,7 @@ final class AutoLock {
     private var strongSince: Date?
     private var timer: Timer?
     private var lockPendingUntil: Date?
+    private var leftUnlockedNoticeAt: Date?
 
     init(link: BleCarLink, api: CarAPI, cachedStatus: @escaping () -> CarStatus?, otherPhoneLeads: @escaping () -> Bool = { false }) {
         self.link = link
@@ -140,6 +160,8 @@ final class AutoLock {
     private func linkLost() {
         stopWatching()
         guard isOn else { return }
+        link.note("Auto-lock: link lost while \(phase.name)")
+        if phase != .done, !otherPhoneLeads() { checkLeftUnlocked() }
         switch phase {
         case .near, .leaving:
             let until = Date().addingTimeInterval(Self.reconnectWindow)
@@ -260,6 +282,46 @@ final class AutoLock {
 
     private static let alreadyLocked = "already locked"
 
+    /// Asks the server, as the car sees it now, whether it was left unlocked; notifies if so.
+    private func checkLeftUnlocked() {
+        if let last = leftUnlockedNoticeAt, Date().timeIntervalSince(last) < Self.leftUnlockedQuiet { return }
+        var background = UIBackgroundTaskIdentifier.invalid
+        background = UIApplication.shared.beginBackgroundTask(withName: "auto-lock check") {
+            UIApplication.shared.endBackgroundTask(background)
+            background = .invalid
+        }
+        Task {
+            defer { if background != .invalid { UIApplication.shared.endBackgroundTask(background) } }
+            var status = await fetchStatus(refresh: true, timeout: Self.refreshTimeout)
+            if status == nil { status = await fetchStatus() }
+            guard link.state != .ready else {
+                link.note("Auto-lock: reconnected to the car; skipping the left-unlocked check")
+                return
+            }
+            guard let status, let at = status.receivedAt ?? status.updatedAt,
+                  Date().timeIntervalSince(at) < Self.statusFreshness else {
+                link.note("Auto-lock: no fresh report after losing the car; can't tell if it's locked")
+                return
+            }
+            if status.locked != false {
+                link.note("Auto-lock: the car is \(status.locked == true ? "locked" : "of unknown lock state")")
+                return
+            }
+            if status.powerOn == true || (status.speedKmh ?? 0) > 0 {
+                link.note("Auto-lock: the car is unlocked but on or moving; not notifying")
+                return
+            }
+            leftUnlockedNoticeAt = Date()
+            if status.anyDoorOpen == true || status.trunkOpen == true {
+                link.note("Auto-lock: the car was left unlocked with a door open")
+                CarNotifications.post("The car is unlocked and a door is open.")
+            } else {
+                link.note("Auto-lock: the car was left unlocked; offering to lock it")
+                CarNotifications.postLeftUnlocked("The car is unlocked. Lock it through BYD's cloud?")
+            }
+        }
+    }
+
     /// Why not to lock, according to a fresh server report; nil to go ahead.
     private func vetoReason() async -> String? {
         let status = await fetchStatus() ?? cachedStatus()
@@ -272,10 +334,10 @@ final class AutoLock {
         return nil
     }
 
-    private func fetchStatus() async -> CarStatus? {
-        let fetch = Task { try? await api.status() }
+    private func fetchStatus(refresh: Bool = false, timeout: TimeInterval = AutoLock.statusTimeout) async -> CarStatus? {
+        let fetch = Task { try? await api.status(refresh: refresh) }
         let limit = Task {
-            try? await Task.sleep(for: .seconds(Self.statusTimeout))
+            try? await Task.sleep(for: .seconds(timeout))
             fetch.cancel()
         }
         defer { limit.cancel() }
