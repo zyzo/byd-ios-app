@@ -17,10 +17,6 @@
 	<string>Locks, unlocks and opens your car directly over Bluetooth when you are nearby.</string>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Connects to your BYD Companion server on your local network.</string>
-	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
-	<string>Wakes the app near your parked car so it can unlock it as you walk up. Your location stays on this iPhone.</string>
-	<key>NSLocationWhenInUseUsageDescription</key>
-	<string>Wakes the app near your parked car so it can unlock it as you walk up. Your location stays on this iPhone.</string>
 	<key>ServerToken</key>
 	<string>$(SERVER_TOKEN)</string>
 	<key>ServerURL</key>
