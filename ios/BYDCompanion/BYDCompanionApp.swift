@@ -14,7 +14,7 @@ struct BYDCompanionApp: App {
 }
 
 /// Long-lived services, created at launch so a background relaunch by iOS
-/// (Bluetooth restore, geofence) finds them ready even with no screen shown.
+/// (Bluetooth restore, background refresh) finds them ready even with no screen shown.
 @MainActor
 final class AppServices {
     static let shared = AppServices()
@@ -28,13 +28,12 @@ final class AppServices {
     private init() {
         let ble = BleCarLink()
         let trips = TripStore()
-        // Neither walk-up/walk-away feature acts while another phone is driving the car.
-        let autoUnlock = AutoUnlock(link: ble, otherPhoneLeads: { trips.otherPhoneLeads })
         self.ble = ble
         self.trips = trips
-        self.autoUnlock = autoUnlock
+        // Neither walk-up/walk-away feature acts while another phone is driving the car.
+        autoUnlock = AutoUnlock(link: ble, otherPhoneLeads: { trips.otherPhoneLeads })
         autoLock = AutoLock(link: ble, api: CarAPI(), cachedStatus: StatusCache.load, otherPhoneLeads: { trips.otherPhoneLeads })
-        tripLogger = TripLogger(link: ble, store: trips, carLocation: { autoUnlock.carLocation })
+        tripLogger = TripLogger(link: ble, store: trips)
     }
 }
 
