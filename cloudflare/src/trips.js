@@ -610,6 +610,9 @@ export class TripStore {
 
   tripRows({ since = null, limit = 200, includeDeleted = false } = {}) {
     let rows;
+    // Old trips changed in place (re-priced) since the client's last pull: send them all again.
+    const changedAt = this.getSetting("_tripsChangedAt", null);
+    if (since && changedAt && since < changedAt) since = null;
     if (since) {
       rows = this.rows(
         `SELECT t.*, p.name AS phone_name FROM trips t LEFT JOIN phones p ON p.id = t.phone_id
@@ -662,6 +665,20 @@ export class TripStore {
     if (!exists) return false;
     this.run(`UPDATE trips SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL`, this.now().toISOString(), id);
     return true;
+  }
+
+  /// Corrects a mistyped electricity price on stored trips: every trip priced at `fromPriceKwh`
+  /// is re-priced at `toPriceKwh`. Trips priced at any other rate keep theirs.
+  repriceTrips({ fromPriceKwh, toPriceKwh } = {}) {
+    if (!isNumber(fromPriceKwh) || !isNumber(toPriceKwh) || fromPriceKwh <= 0 || toPriceKwh <= 0) {
+      throw new HttpError(400, "fromPriceKwh and toPriceKwh must be positive numbers");
+    }
+    const [{ n }] = this.rows(`SELECT COUNT(*) AS n FROM trips WHERE price_kwh = ?`, fromPriceKwh);
+    if (n > 0) {
+      this.run(`UPDATE trips SET price_kwh = ? WHERE price_kwh = ?`, toPriceKwh, fromPriceKwh);
+      this.setSetting("_tripsChangedAt", this.now().toISOString());
+    }
+    return { updated: n };
   }
 
   // --- phones and events -------------------------------------------------------------------
@@ -902,11 +919,14 @@ export class TripStore {
         if (!this.deleteTrip(tripMatch[1])) return json({ detail: "No such trip" }, 404);
         return json({ deleted: tripMatch[1] });
       }
+      if (path === "/trips/reprice" && method === "POST") {
+        return json(this.repriceTrips(await request.json()));
+      }
       if (path === "/settings" && method === "GET") return json(this.getSettings());
       if (path === "/settings" && method === "PUT") return json(this.putSettings(await request.json()));
       if (path === "/phones" && method === "GET") return json(this.getPhones());
       if (path === "/lease" && method === "POST") return json(this.lease(await request.json()));
-      if (["/trips", "/trips/events", "/settings", "/phones", "/lease"].includes(path) || tripMatch) {
+      if (["/trips", "/trips/events", "/trips/reprice", "/settings", "/phones", "/lease"].includes(path) || tripMatch) {
         return json({ detail: "Method not allowed" }, 405);
       }
       return null;

@@ -447,3 +447,34 @@ test("HTTP handler answers the trip routes and leaves the rest to the container"
   const bad = await store.handle(req("/settings", { method: "PUT", body: "{" }));
   assert.equal(bad.status, 400);
 });
+
+test("re-pricing fixes trips stored at a mistyped electricity price and resends them to phones", async () => {
+  let now = new Date(T0);
+  const store = new TripStore(memorySql(), { now: () => now });
+  const trip = (id, minutes, priceKwh) =>
+    store.run(
+      `INSERT INTO trips (id, start_at, end_at, odo_start, odo_end, kwh, litres, price_kwh, price_litre, created_at)
+       VALUES (?, ?, ?, 0, 10, 1.3, 0, ?, 21150, ?)`,
+      id, at(minutes), at(minutes + 30), priceKwh, at(minutes + 30),
+    );
+  trip("a", 0, 75000);
+  trip("b", 60, 75000);
+  trip("c", 120, 3700);
+  now = new Date(T0 + 4 * 3600000);
+  const lastPull = store.listTrips().serverTime;
+
+  now = new Date(T0 + 5 * 3600000);
+  const req = (body) => new Request("http://container/trips/reprice", { method: "POST", body: JSON.stringify(body) });
+  const done = await (await store.handle(req({ fromPriceKwh: 75000, toPriceKwh: 7500 }))).json();
+  assert.equal(done.updated, 2);
+  const costs = Object.fromEntries(store.listTrips().trips.map((t) => [t.id, t.cost]));
+  assert.equal(costs.a.priceKwh, 7500);
+  assert.equal(costs.a.total, 9750);
+  assert.equal(costs.c.priceKwh, 3700);
+
+  // A phone that pulled before the fix gets every trip again, not only newer ones.
+  assert.equal(store.listTrips({ since: lastPull }).trips.length, 3);
+  assert.equal(store.listTrips({ since: new Date(T0 + 6 * 3600000).toISOString() }).trips.length, 0);
+
+  assert.equal((await store.handle(req({ fromPriceKwh: 75000 }))).status, 400);
+});
