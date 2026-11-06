@@ -46,6 +46,7 @@ struct CarProvider: TimelineProvider {
 
     private func entry() async -> CarEntry {
         let bluetooth = await Self.bluetoothReady()
+        CarLinkState.widgetShowsBluetooth = bluetooth
         if let pending = RecentCommands.pending {
             if let task = InflightCommand.task {
                 // A key was just tapped: redraw from what we already know, right away,
