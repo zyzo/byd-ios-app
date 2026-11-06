@@ -96,7 +96,8 @@ struct HomeView: View {
         Group {
             RangeBar(electricKm: s.rangeElectricKm ?? 0, fuelKm: s.rangeFuelKm ?? 0)
 
-            LockButton(locked: s.locked ?? true, busy: model.pending.contains(.lock), action: model.toggleLock)
+            LockButton(locked: s.locked ?? true, busy: model.pending.contains(.lock),
+                       bluetooth: overBluetooth(.lock), action: model.toggleLock)
 
             LazyVGrid(columns: [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)], spacing: 12) {
                 ControlTile(
@@ -105,6 +106,7 @@ struct HomeView: View {
                     detail: s.trunkOpen == true ? "Open" : nil,
                     active: s.trunkOpen == true,
                     busy: model.pending.contains(.trunk),
+                    bluetooth: overBluetooth(s.trunkOpen == true ? .trunkClose : .trunkOpen),
                     action: model.toggleTrunk
                 )
                 ControlTile(
@@ -128,6 +130,7 @@ struct HomeView: View {
                     systemImage: "speaker.wave.3.fill",
                     detail: model.pending.contains(.honk) ? "Horn & lights…" : nil,
                     active: model.pending.contains(.honk),
+                    bluetooth: overBluetooth(.honk),
                     action: model.honk
                 )
             }
@@ -141,6 +144,11 @@ struct HomeView: View {
 
     /// Last-known information is faded until the server confirms it.
     private var dim: Double { model.stale ? 0.45 : 1 }
+
+    /// Whether a key's next command will go over the Bluetooth key rather than the cloud.
+    private func overBluetooth(_ command: CarCommand) -> Bool {
+        model.ble.state == .ready && command.worksOverBluetooth
+    }
 
     @ViewBuilder
     private func statusPill(_ s: CarStatus) -> some View {
