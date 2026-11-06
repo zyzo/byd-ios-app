@@ -86,6 +86,24 @@ final class TripStore {
         }
     }
 
+    /// Corrects a refuel or a charge on the way; nil for both goes back to the estimate.
+    func editRefill(_ trip: Trip, _ kind: Refill.Kind, amount: Double?, cost: Double?) async {
+        guard let index = trips.firstIndex(where: { $0.id == trip.id }) else { return }
+        var refills = trips[index].refills ?? TripRefills()
+        refills[kind] = amount == nil && cost == nil ? nil : TripRefills.Edit(amount: amount, cost: cost)
+        trips[index].refills = refills.fuel == nil && refills.charge == nil ? nil : refills
+        save()
+        do {
+            if let saved = try await api.editRefill(trip.id, kind: kind, amount: amount, cost: cost),
+               let index = trips.firstIndex(where: { $0.id == saved.id }) {
+                trips[index] = saved
+                save()
+            }
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
     func loadSettings() async {
         if let fetched = try? await api.settings() {
             settings = fetched

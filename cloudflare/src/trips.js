@@ -11,7 +11,7 @@ export const CALIBRATION_TOLERANCE = 0.1;
 const ENERGY_INTERVAL_MS = 60 * 60 * 1000;
 const EVENT_RETENTION_DAYS = 7;
 
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
 
 const MIGRATIONS = [
   // v1
@@ -88,6 +88,10 @@ const MIGRATIONS = [
   ALTER TABLE trips ADD COLUMN car_end_at TEXT;
   ALTER TABLE trips ADD COLUMN gap_start_at TEXT;
   UPDATE trips SET car_start_at = start_at, car_end_at = end_at;
+  `,
+  // v3: what a refuel or a charge on the way really came to, as the person corrected it.
+  `
+  ALTER TABLE trips ADD COLUMN refills TEXT;
   `,
 ];
 
@@ -667,6 +671,34 @@ export class TripStore {
     return true;
   }
 
+  /// Stores what a refuel ("fuel", litres) or a charge on the way ("charge", kWh) really came to,
+  /// and what it cost in dong; null for both goes back to the app's estimate.
+  editRefill(id, { kind, amount = null, cost = null } = {}) {
+    if (kind !== "fuel" && kind !== "charge") throw new HttpError(400, 'kind must be "fuel" or "charge"');
+    for (const value of [amount, cost]) {
+      if (value !== null && !(isNumber(value) && value > 0)) {
+        throw new HttpError(400, "amount and cost must be positive numbers or null");
+      }
+    }
+    const row = this.rows(`SELECT refills FROM trips WHERE id = ?`, id)[0];
+    if (!row) return null;
+    const refills = row.refills ? JSON.parse(row.refills) : {};
+    if (amount === null && cost === null) delete refills[kind];
+    else refills[kind] = { amount, cost };
+    const stored = Object.keys(refills).length ? JSON.stringify(refills) : null;
+    this.run(`UPDATE trips SET refills = ? WHERE id = ?`, stored, id);
+    this.setSetting("_tripsChangedAt", this.now().toISOString());
+    return publicTrip(this.tripRow(id));
+  }
+
+  tripRow(id) {
+    const rows = this.rows(
+      `SELECT t.*, p.name AS phone_name FROM trips t LEFT JOIN phones p ON p.id = t.phone_id WHERE t.id = ?`,
+      id,
+    );
+    return rows.length ? tripFromRow(rows[0]) : null;
+  }
+
   /// Corrects a mistyped electricity price on stored trips: every trip priced at `fromPriceKwh`
   /// is re-priced at `toPriceKwh`. Trips priced at any other rate keep theirs.
   repriceTrips({ fromPriceKwh, toPriceKwh } = {}) {
@@ -915,6 +947,11 @@ export class TripStore {
         return null; // handled by the Durable Object, which knows how to reach the container
       }
       const tripMatch = path.match(/^\/trips\/([^/]+)$/);
+      const refillMatch = path.match(/^\/trips\/([^/]+)\/refill$/);
+      if (refillMatch && method === "PUT") {
+        const trip = this.editRefill(refillMatch[1], await request.json());
+        return trip ? json(trip) : json({ detail: "No such trip" }, 404);
+      }
       if (tripMatch && method === "DELETE") {
         if (!this.deleteTrip(tripMatch[1])) return json({ detail: "No such trip" }, 404);
         return json({ deleted: tripMatch[1] });
@@ -926,7 +963,7 @@ export class TripStore {
       if (path === "/settings" && method === "PUT") return json(this.putSettings(await request.json()));
       if (path === "/phones" && method === "GET") return json(this.getPhones());
       if (path === "/lease" && method === "POST") return json(this.lease(await request.json()));
-      if (["/trips", "/trips/events", "/trips/reprice", "/settings", "/phones", "/lease"].includes(path) || tripMatch) {
+      if (["/trips", "/trips/events", "/trips/reprice", "/settings", "/phones", "/lease"].includes(path) || tripMatch || refillMatch) {
         return json({ detail: "Method not allowed" }, 405);
       }
       return null;
@@ -994,6 +1031,7 @@ function tripFromRow(r) {
     carStartAt: r.car_start_at ?? r.start_at,
     carEndAt: r.car_end_at ?? r.end_at,
     gapStartAt: r.gap_start_at,
+    refills: r.refills ? JSON.parse(r.refills) : null,
   };
 }
 
@@ -1031,5 +1069,6 @@ function publicTrip(t) {
     flags: t.flags,
     source: t.source,
     deletedAt: t.deletedAt,
+    refills: t.refills ?? null,
   };
 }

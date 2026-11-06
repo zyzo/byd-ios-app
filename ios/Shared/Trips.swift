@@ -33,6 +33,8 @@ struct Trip: Codable, Identifiable, Equatable {
     /// `car` (power on/off pair) or `coarse` (odometer jump with no pair).
     var source: String
     var deletedAt: Date?
+    /// What a refuel or a charge on the way really came to, where someone corrected the estimate.
+    var refills: TripRefills? = nil
 
     func has(_ flag: Flag) -> Bool { flags.contains(flag.rawValue) }
     var withoutPhone: Bool { phoneId == nil }
@@ -41,6 +43,97 @@ struct Trip: Codable, Identifiable, Equatable {
     var duration: TimeInterval? { endAt.map { $0.timeIntervalSince(startAt) } }
     /// Trips are grouped by when they ended; an open trip by when it started.
     var day: Date { Calendar.current.startOfDay(for: endAt ?? startAt) }
+}
+
+/// `refills` on a trip: corrections by kind; a nil value falls back to the estimate.
+struct TripRefills: Codable, Equatable {
+    struct Edit: Codable, Equatable {
+        /// Litres for fuel, kWh for a charge.
+        var amount: Double?
+        /// Dong.
+        var cost: Double?
+    }
+
+    var fuel: Edit?
+    var charge: Edit?
+
+    subscript(kind: Refill.Kind) -> Edit? {
+        get { kind == .fuel ? fuel : charge }
+        set { if kind == .fuel { fuel = newValue } else { charge = newValue } }
+    }
+}
+
+/// A refuel or a charge during a trip. Estimated from how far the gauge rose, times the tank or
+/// battery size and the trip's price, unless someone entered what it really came to.
+struct Refill: Equatable {
+    enum Kind: String, Codable {
+        case fuel, charge
+    }
+
+    var kind: Kind
+    /// Litres for fuel, kWh for a charge; nil when the gauge didn't rise (energy used on the way hid it).
+    var amount: Double?
+    /// Dong.
+    var cost: Double?
+    var amountEstimated: Bool
+    var costEstimated: Bool
+    /// The estimate, for the editor to show and go back to.
+    var estimatedAmount: Double?
+    var price: Double?
+
+    var unit: String { kind == .fuel ? "L" : "kWh" }
+    var title: String { kind == .fuel ? "Refuelled" : "Charged" }
+    var symbol: String { kind == .fuel ? "fuelpump.fill" : "bolt.fill" }
+
+    /// "≈ 33.6 L · ≈ 711kđ"; nil when there is nothing to show.
+    var summary: String? {
+        var parts: [String] = []
+        if let amount {
+            parts.append((amountEstimated ? "≈ " : "") + amount.formatted(.number.precision(.fractionLength(1))) + " " + unit)
+        }
+        if let cost {
+            parts.append((costEstimated ? "≈ " : "") + Money.kdong(cost))
+        }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    }
+}
+
+extension Trip {
+    /// The refuel and the charge on the way, if the car flagged either.
+    func refills(_ settings: EnergySettings) -> [Refill] {
+        [Refill.Kind.fuel, .charge].compactMap { refill($0, settings) }
+    }
+
+    func refill(_ kind: Refill.Kind, _ settings: EnergySettings) -> Refill? {
+        let estimated: Double?
+        let price: Double?
+        switch kind {
+        case .fuel:
+            guard has(.refuelledDuringTrip) else { return nil }
+            estimated = Self.rise(fuelStart, fuelEnd).map { $0 / 100 * settings.tankLitres }
+            price = cost?.priceLitre
+        case .charge:
+            guard has(.chargedDuringTrip) else { return nil }
+            estimated = Self.rise(socStart, socEnd).map { $0 / 100 * settings.batteryKwh }
+            price = cost?.priceKwh
+        }
+        let edit = refills?[kind]
+        let amount = edit?.amount ?? estimated
+        let cost = edit?.cost ?? both(amount, price).map { $0 * $1 }
+        return Refill(kind: kind, amount: amount, cost: cost,
+                      amountEstimated: edit?.amount == nil, costEstimated: edit?.cost == nil,
+                      estimatedAmount: estimated, price: price)
+    }
+
+    private static func rise(_ start: Double?, _ end: Double?) -> Double? {
+        guard let start, let end, end > start else { return nil }
+        return end - start
+    }
+}
+
+private func both(_ a: Double?, _ b: Double?) -> (Double, Double)? {
+    guard let a, let b else { return nil }
+    return (a, b)
 }
 
 struct TripCost: Codable, Equatable {
