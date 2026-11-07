@@ -80,9 +80,13 @@ struct Refill: Equatable {
     /// The estimate, for the editor to show and go back to.
     var estimatedAmount: Double?
     var price: Double?
+    /// How the estimate was made, for the editor; nil uses the trip's own wording.
+    var note: String? = nil
+    /// A charge while parked after the trip, not one on the way.
+    var after = false
 
     var unit: String { kind == .fuel ? "L" : "kWh" }
-    var title: String { kind == .fuel ? "Refuelled" : "Charged" }
+    var title: String { kind == .fuel ? "Refuelled" : after ? "Charged after" : "Charged" }
     var symbol: String { kind == .fuel ? "fuelpump.fill" : "bolt.fill" }
 
     /// "≈ 33.6 L · ≈ 711kđ"; nil when there is nothing to show.
@@ -128,6 +132,45 @@ extension Trip {
     private static func rise(_ start: Double?, _ end: Double?) -> Double? {
         guard let start, let end, end > start else { return nil }
         return end - start
+    }
+}
+
+/// A charge while the car stood between two trips: the battery was at least 5 points higher when
+/// the next trip began than when the car stopped. `kwh` is the server's estimate of what the
+/// charger delivered; `edit` is what someone said it really came to.
+struct Charge: Codable, Identifiable, Equatable {
+    var id: String
+    /// When the car stopped before the charge.
+    var parkedAt: Date
+    /// When the car's charging flag came on, else when it stopped.
+    var startAt: Date
+    /// When the flag went off, else when the next trip began.
+    var endAt: Date
+    var odometerKm: Double
+    var socStart: Double
+    var socEnd: Double
+    var chargingSeen: Bool
+    var kwh: Double?
+    var priceKwh: Double?
+    var edit: TripRefills.Edit?
+    var deletedAt: Date?
+
+    var day: Date { Calendar.current.startOfDay(for: endAt) }
+
+    func refill(_ settings: EnergySettings) -> Refill {
+        let amount = edit?.amount ?? kwh
+        let cost = edit?.cost ?? both(amount, priceKwh).map { $0 * $1 }
+        let lost = Int(((1 - settings.chargeEfficiency) * 100).rounded())
+        var note = "Leave a field empty to use the estimate: the battery rose from \(Int(socStart)) % to \(Int(socEnd)) % of \(settings.batteryKwh.formatted(.number.precision(.fractionLength(0...1)))) kWh, with \(lost) % more lost while charging"
+        if let priceKwh { note += ", at \(Money.kdong(priceKwh, per: "kWh"))" }
+        return Refill(kind: .charge, amount: amount, cost: cost,
+                      amountEstimated: edit?.amount == nil, costEstimated: edit?.cost == nil,
+                      estimatedAmount: kwh, price: priceKwh, note: note + ".", after: true)
+    }
+
+    /// "09:53–10:24".
+    var timeRange: String {
+        startAt.formatted(date: .omitted, time: .shortened) + "–" + endAt.formatted(date: .omitted, time: .shortened)
     }
 }
 
@@ -194,6 +237,8 @@ struct EnergySettings: Codable, Equatable {
     var batterySource: Source = .model
     var tankSource: Source = .model
     var notifyOnTrip: Bool = false
+    /// Share of the charger's kWh that reaches the battery.
+    var chargeEfficiency: Double = 0.9
 
     init() {}
 
@@ -207,6 +252,7 @@ struct EnergySettings: Codable, Equatable {
         batterySource = try c.decodeIfPresent(Source.self, forKey: .batterySource) ?? .model
         tankSource = try c.decodeIfPresent(Source.self, forKey: .tankSource) ?? .model
         notifyOnTrip = try c.decodeIfPresent(Bool.self, forKey: .notifyOnTrip) ?? false
+        chargeEfficiency = try c.decodeIfPresent(Double.self, forKey: .chargeEfficiency) ?? 0.9
     }
 }
 
@@ -272,6 +318,7 @@ struct LeaseResponse: Codable, Equatable {
 
 struct TripsResponse: Codable {
     var trips: [Trip]
+    var charges: [Charge]? = nil
     var openTrip: Trip?
     var settings: EnergySettings?
     var serverTime: Date?
@@ -369,6 +416,33 @@ struct DayKm: Identifiable {
     var id: Date { day }
 }
 
+/// A row of the trip log: a trip, or a charge between two trips.
+enum LogEntry: Identifiable {
+    case trip(Trip)
+    case charge(Charge)
+
+    var id: String {
+        switch self {
+        case .trip(let trip): "trip-" + trip.id
+        case .charge(let charge): "charge-" + charge.id
+        }
+    }
+
+    var day: Date {
+        switch self {
+        case .trip(let trip): trip.day
+        case .charge(let charge): charge.day
+        }
+    }
+
+    var sortDate: Date {
+        switch self {
+        case .trip(let trip): trip.endAt ?? trip.startAt
+        case .charge(let charge): charge.endAt
+        }
+    }
+}
+
 enum TripMath {
     /// Closed trips in a calendar month.
     static func trips(_ trips: [Trip], inMonthOf date: Date) -> [Trip] {
@@ -387,11 +461,16 @@ enum TripMath {
         }
     }
 
-    /// Newest day first, each day's trips newest first.
-    static func byDay(_ trips: [Trip]) -> [(day: Date, trips: [Trip])] {
-        let groups = Dictionary(grouping: trips, by: \.day)
+    static func charges(_ charges: [Charge], in week: Week) -> [Charge] {
+        charges.filter { week.contains($0.day) }
+    }
+
+    /// Newest day first, each day's trips and charges newest first.
+    static func byDay(_ trips: [Trip], _ charges: [Charge] = []) -> [(day: Date, entries: [LogEntry])] {
+        let entries = trips.map(LogEntry.trip) + charges.map(LogEntry.charge)
+        let groups = Dictionary(grouping: entries, by: \.day)
         return groups.keys.sorted(by: >).map { day in
-            (day, groups[day]!.sorted { ($0.endAt ?? $0.startAt) > ($1.endAt ?? $1.startAt) })
+            (day, groups[day]!.sorted { $0.sortDate > $1.sortDate })
         }
     }
 

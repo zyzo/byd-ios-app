@@ -8,6 +8,7 @@ import Observation
 @Observable
 final class TripStore {
     private(set) var trips: [Trip] = []
+    private(set) var charges: [Charge] = []
     private(set) var openTrip: Trip?
     private(set) var settings = EnergySettings()
     private(set) var prices: Prices?
@@ -34,6 +35,7 @@ final class TripStore {
         self.api = api
         if let mirror = Mirror.load() {
             trips = mirror.trips
+            charges = mirror.charges ?? []
             openTrip = mirror.openTrip
             settings = mirror.settings
             prices = mirror.prices
@@ -72,6 +74,11 @@ final class TripStore {
             }
         }
         trips = byId.values.sorted { ($0.endAt ?? $0.startAt) > ($1.endAt ?? $1.startAt) }
+        var chargesById = Dictionary(uniqueKeysWithValues: charges.map { ($0.id, $0) })
+        for charge in response.charges ?? [] {
+            chargesById[charge.id] = charge.deletedAt == nil ? charge : nil
+        }
+        charges = chargesById.values.sorted { $0.endAt > $1.endAt }
         openTrip = response.openTrip
         if let settings = response.settings { self.settings = settings }
     }
@@ -99,6 +106,45 @@ final class TripStore {
                 trips[index] = saved
                 save()
             }
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    /// Corrects a charge between trips; nil for both goes back to the estimate.
+    func editCharge(_ charge: Charge, amount: Double?, cost: Double?) async {
+        guard let index = charges.firstIndex(where: { $0.id == charge.id }) else { return }
+        charges[index].edit = amount == nil && cost == nil ? nil : TripRefills.Edit(amount: amount, cost: cost)
+        save()
+        do {
+            if let saved = try await api.editCharge(charge.id, amount: amount, cost: cost),
+               let index = charges.firstIndex(where: { $0.id == saved.id }) {
+                charges[index] = saved
+                save()
+            }
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    /// The charge while the car stood after `trip`: it begins where the trip ended.
+    func charge(after trip: Trip) -> Charge? {
+        guard let odoEnd = trip.odoEnd else { return nil }
+        return charges.first { $0.odometerKm == odoEnd }
+    }
+
+    /// Charges with no trip before them in the log, shown on their own.
+    func unattachedCharges(_ charges: [Charge]) -> [Charge] {
+        let ends = Set(trips.compactMap(\.odoEnd))
+        return charges.filter { !ends.contains($0.odometerKm) }
+    }
+
+    /// For a rise that wasn't a charge.
+    func delete(_ charge: Charge) async {
+        charges.removeAll { $0.id == charge.id }
+        save()
+        do {
+            try await api.deleteCharge(charge.id)
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -179,7 +225,7 @@ final class TripStore {
 
     private func save() {
         Mirror(
-            trips: trips, openTrip: openTrip, settings: settings, prices: prices, phones: phones,
+            trips: trips, charges: charges, openTrip: openTrip, settings: settings, prices: prices, phones: phones,
             leader: leader, leaderSeenAt: leaderSeenAt, lastRefresh: lastRefresh, outbox: outbox
         ).save()
     }
@@ -187,6 +233,7 @@ final class TripStore {
     /// What `trips.json` in the App Group holds.
     struct Mirror: Codable {
         var trips: [Trip]
+        var charges: [Charge]?
         var openTrip: Trip?
         var settings: EnergySettings
         var prices: Prices?
