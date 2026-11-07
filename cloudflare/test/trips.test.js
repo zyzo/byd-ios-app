@@ -262,8 +262,8 @@ test("calibration adopts a measured capacity after three readings within 10 %", 
 
 test("migrations are idempotent", () => {
   const sql = memorySql();
-  assert.equal(migrate(sql), 2);
-  assert.equal(migrate(sql), 2);
+  assert.equal(migrate(sql), 3);
+  assert.equal(migrate(sql), 3);
   const tables = sql.exec(`SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name`).toArray().map((r) => r.name);
   for (const name of ["snapshots", "trips", "phone_events", "phones", "settings", "leases", "schema_version"]) {
     assert.ok(tables.includes(name), name);
@@ -398,7 +398,7 @@ test("upgrading from v1 re-cuts 5 Nov 2026: two drives, the second reported 36 m
   store.insertTrip(computeTrip({ id: "old", startAt: utc(17, 14, 51), endAt: utc(20, 40, 26), odoStart: 3784, odoEnd: 3788 }));
 
   // Back to v1, as the live store was before this change, then open it again.
-  for (const column of ["car_start_at", "car_end_at", "gap_start_at"]) sql.exec(`ALTER TABLE trips DROP COLUMN ${column}`);
+  for (const column of ["car_start_at", "car_end_at", "gap_start_at", "refills"]) sql.exec(`ALTER TABLE trips DROP COLUMN ${column}`);
   sql.exec(`UPDATE schema_version SET version = 1`);
   const upgraded = new TripStore(sql, { now });
   const trips = upgraded.listTrips().trips.reverse();
@@ -477,4 +477,36 @@ test("re-pricing fixes trips stored at a mistyped electricity price and resends 
   assert.equal(store.listTrips({ since: new Date(T0 + 6 * 3600000).toISOString() }).trips.length, 0);
 
   assert.equal((await store.handle(req({ fromPriceKwh: 75000 }))).status, 400);
+});
+
+test("refill edits: stored per kind, cleared back to the estimate, and resent to phones", async () => {
+  let now = new Date(T0);
+  const store = new TripStore(memorySql(), { now: () => now });
+  store.run(
+    `INSERT INTO trips (id, start_at, end_at, odo_start, odo_end, kwh, litres, fuel_start, fuel_end, flags, created_at)
+     VALUES ('t', ?, ?, 0, 9, 1.3, 0, 5, 61, '["refuelledDuringTrip"]', ?)`,
+    at(0), at(50), at(50),
+  );
+  assert.equal(store.listTrips().trips[0].refills, null);
+  const lastPull = store.listTrips().serverTime;
+
+  now = new Date(T0 + 3600000);
+  const put = (id, body) =>
+    store.handle(new Request(`http://container/trips/${id}/refill`, { method: "PUT", body: JSON.stringify(body) }));
+  const edited = await (await put("t", { kind: "fuel", amount: 33.2, cost: 705000 })).json();
+  assert.deepEqual(edited.refills, { fuel: { amount: 33.2, cost: 705000 } });
+  await put("t", { kind: "charge", amount: null, cost: 40000 });
+  assert.deepEqual(store.listTrips().trips[0].refills, {
+    fuel: { amount: 33.2, cost: 705000 },
+    charge: { amount: null, cost: 40000 },
+  });
+  assert.equal(store.listTrips({ since: lastPull }).trips.length, 1);
+
+  await put("t", { kind: "charge" });
+  await put("t", { kind: "fuel", amount: null, cost: null });
+  assert.equal(store.listTrips().trips[0].refills, null);
+
+  assert.equal((await put("nope", { kind: "fuel", amount: 1 })).status, 404);
+  assert.equal((await put("t", { kind: "petrol", amount: 1 })).status, 400);
+  assert.equal((await put("t", { kind: "fuel", amount: -1 })).status, 400);
 });
