@@ -98,12 +98,13 @@ enum DemoTrips {
     /// A closed trip; cost at the sample prices, electric share from the kWh.
     static func trip(id: String, start: Date, minutes: Int, km: Double, kwh: Double, litres: Double,
                      odoStart: Double, socStart: Double, fuelStart: Double,
-                     phone: Phone?, flags: [Trip.Flag] = [], source: String = "car") -> Trip {
+                     phone: Phone?, flags: [Trip.Flag] = [], source: String = "car",
+                     socAdded: Double = 0, fuelAdded: Double = 0) -> Trip {
         let tooShort = flags.contains(.tooShortToMeasure)
         let evKm = tooShort ? 0 : (litres == 0 ? km : min(km, kwh / evRate))
         let petrolKm = tooShort ? 0 : km - evKm
-        let socEnd = max(0, socStart - (kwh / settings.batteryKwh * 100).rounded())
-        let fuelEnd = max(0, fuelStart - (litres / settings.tankLitres * 100).rounded())
+        let socEnd = max(0, socStart - (kwh / settings.batteryKwh * 100).rounded() + socAdded)
+        let fuelEnd = max(0, fuelStart - (litres / settings.tankLitres * 100).rounded() + fuelAdded)
         var cost: TripCost?
         if !tooShort, let priceKwh = settings.priceKwh, let petrol = prices.petrol {
             let total = kwh * priceKwh + litres * petrol.vndPerLitre
@@ -150,12 +151,14 @@ enum DemoTrips {
         for (i, r) in rows.enumerated() {
             let kwh = r.flags.contains(.tooShortToMeasure) ? 0 : r.kwh
             let litres = r.flags.contains(.tooShortToMeasure) ? 0 : r.l
-            let socStart = min(100, soc + (kwh / settings.batteryKwh * 100).rounded() + (r.flags.contains(.chargedDuringTrip) ? -20 : 0))
-            let fuelStart = min(100, fuel + (litres / settings.tankLitres * 100).rounded() + (r.flags.contains(.refuelledDuringTrip) ? -30 : 0))
+            let socAdded = r.flags.contains(.chargedDuringTrip) ? 20.0 : 0
+            let fuelAdded = r.flags.contains(.refuelledDuringTrip) ? 45.0 : 0
+            let socStart = min(100, soc + (kwh / settings.batteryKwh * 100).rounded() - socAdded)
+            let fuelStart = min(100, fuel + (litres / settings.tankLitres * 100).rounded() - fuelAdded)
             trips.append(trip(
                 id: "demo-\(i)", start: at(daysAgo: r.days, r.h, r.m), minutes: r.min, km: r.km, kwh: kwh, litres: litres,
                 odoStart: odo, socStart: socStart, fuelStart: fuelStart, phone: r.phone, flags: r.flags,
-                source: r.flags.contains(.coarse) ? "coarse" : "car"
+                source: r.flags.contains(.coarse) ? "coarse" : "car", socAdded: socAdded, fuelAdded: fuelAdded
             ))
             odo -= r.km
             soc = socStart < 30 ? 82 : socStart
