@@ -7,11 +7,13 @@ import UIKit
 /// Once the signal has been above the chosen distance's threshold for a moment you count as
 /// at the car; when it then stays below for a few seconds, one lock goes out over Bluetooth
 /// (never the cloud). If the link drops first, it locks on reconnect within two minutes.
-/// A fresh server report saying the car is on, moving or open vetoes the lock.
+/// A fresh server report saying the car is on or moving vetoes the lock; one saying a door is
+/// open holds it, re-asking the car every few seconds and locking once the door is shut.
 ///
-/// iOS suspends the app in the background, which stops the signal readings, so a walk-away
-/// is often never seen. Whenever the link drops without a lock this visit, the app asks the
-/// server whether the car was left unlocked and, if so, posts a notification with a Lock button.
+/// iOS can suspend or end the app in the background, so a walk-away can go unseen. Whenever
+/// the link drops without a lock this visit, including a drop that relaunches an ended app,
+/// the app asks the server whether the car was left unlocked and, if so, posts a notification
+/// with a Lock button.
 @MainActor
 @Observable
 final class AutoLock {
@@ -23,6 +25,8 @@ final class AutoLock {
         case done
         /// Link dropped while leaving; locks if it comes back by then.
         case awaitingReconnect(until: Date)
+        /// Walked away with a door open; locks once a fresh report says it's shut.
+        case doorOpen(until: Date)
 
         var name: String {
             switch self {
@@ -31,15 +35,34 @@ final class AutoLock {
             case .leaving: "leaving"
             case .done: "done"
             case .awaitingReconnect: "awaiting reconnect"
+            case .doorOpen: "waiting for a door"
+            }
+        }
+
+        /// You were at the car this visit, as far as a relaunched app needs to know.
+        var atCar: Bool {
+            switch self {
+            case .near, .leaving, .doorOpen: true
+            case .idle, .done, .awaitingReconnect: false
+            }
+        }
+
+        var mayLock: Bool {
+            switch self {
+            case .leaving, .awaitingReconnect, .doorOpen: true
+            case .idle, .near, .done: false
             }
         }
     }
 
-    static let defaultDistance = 300
+    /// The car drops the link at about -80 dBm, so a longer distance's weak level is never reached.
+    static let distances = [50, 100, 200]
+    static let defaultDistance = 200
     /// dB below the distance's threshold before the signal counts as weak.
     private static let hysteresis = 6.0
     private static let nearHold: TimeInterval = 1.5
-    private static let holdTime: TimeInterval = 8
+    /// Short, since the link often drops within seconds of the signal turning weak.
+    private static let holdTime: TimeInterval = 3
     /// No auto-lock within this long of any Bluetooth command.
     private static let cooldown: TimeInterval = 60
     private static let reconnectWindow: TimeInterval = 2 * 60
@@ -50,17 +73,24 @@ final class AutoLock {
     private static let refreshTimeout: TimeInterval = 20
     /// One left-unlocked notification per this long.
     private static let leftUnlockedQuiet: TimeInterval = 10 * 60
+    /// How long a walk-away waits for an open door to be shut.
+    private static let doorWait: TimeInterval = 2 * 60
+    private static let doorRecheck: TimeInterval = 10
+    private static let recheckTimeout: TimeInterval = 8
 
     private enum Keys {
         static let wanted = "autoLock.wanted"
         static let distance = "autoLock.distance"
+        static let atCar = "autoLock.atCar"
     }
 
     private(set) var isOn: Bool
     var distance: Int {
         didSet { defaults.set(distance, forKey: Keys.distance) }
     }
-    private(set) var phase: Phase = .idle
+    private(set) var phase: Phase = .idle {
+        didSet { if phase.atCar != oldValue.atCar { defaults.set(phase.atCar, forKey: Keys.atCar) } }
+    }
     /// Seconds until the lock goes out while leaving.
     private(set) var countdown: Int?
 
@@ -77,6 +107,8 @@ final class AutoLock {
     private var timer: Timer?
     private var lockPendingUntil: Date?
     private var leftUnlockedNoticeAt: Date?
+    private var checking = false
+    private var nextDoorCheck: Date?
 
     init(link: BleCarLink, api: CarAPI, cachedStatus: @escaping () -> CarStatus?, otherPhoneLeads: @escaping () -> Bool = { false }) {
         self.link = link
@@ -85,8 +117,10 @@ final class AutoLock {
         self.otherPhoneLeads = otherPhoneLeads
         isOn = defaults.bool(forKey: Keys.wanted)
         let saved = defaults.integer(forKey: Keys.distance)
-        distance = AutoUnlock.distances.contains(saved) ? saved : Self.defaultDistance
+        distance = Self.distances.contains(saved) ? saved : Self.defaultDistance
         if AppConfig.demo { isOn = true }
+        // iOS ended the last process mid-visit; its link drop is still to come.
+        if link.orphanedSession, defaults.bool(forKey: Keys.atCar) { phase = .near }
 
         link.onReady.append { [weak self] in self?.sessionStarted() }
         link.onLinkLost.append { [weak self] in self?.linkLost() }
@@ -106,6 +140,7 @@ final class AutoLock {
         isOn = false
         defaults.set(false, forKey: Keys.wanted)
         lockPendingUntil = nil
+        nextDoorCheck = nil
         stopWatching()
         phase = .idle
         link.note("Auto-lock switched off")
@@ -115,9 +150,10 @@ final class AutoLock {
     func manualCommandSent() {
         guard isOn else { return }
         switch phase {
-        case .near, .leaving, .awaitingReconnect:
+        case .near, .leaving, .awaitingReconnect, .doorOpen:
             link.note("Auto-lock: reset by a manual command")
             lockPendingUntil = nil
+            nextDoorCheck = nil
             resetSignal()
             phase = .idle
         case .idle, .done:
@@ -136,6 +172,7 @@ final class AutoLock {
         case .leaving: return "Walking away · locks in \(countdown ?? Int(Self.holdTime)) s"
         case .done: return "Done for this visit"
         case .awaitingReconnect: return "Reconnected · checking the signal"
+        case .doorOpen: return "A door is open · locks once it's shut"
         }
     }
 
@@ -162,8 +199,9 @@ final class AutoLock {
         guard isOn else { return }
         link.note("Auto-lock: link lost while \(phase.name)")
         if phase != .done, !otherPhoneLeads() { checkLeftUnlocked() }
+        nextDoorCheck = nil
         switch phase {
-        case .near, .leaving:
+        case .near, .leaving, .doorOpen:
             let until = Date().addingTimeInterval(Self.reconnectWindow)
             lockPendingUntil = until
             phase = .awaitingReconnect(until: until)
@@ -242,6 +280,22 @@ final class AutoLock {
                 lock(signal: Int(value))
             }
 
+        case .doorOpen(let until):
+            if value >= threshold {
+                phase = .near
+                nextDoorCheck = nil
+                link.note("Auto-lock: you're back at the car")
+            } else if now > until {
+                phase = .done
+                nextDoorCheck = nil
+                stopWatching()
+                link.note("Auto-lock: the door stayed open; not locking")
+                CarNotifications.post("Didn't lock the car as you walked away: a door is still open.")
+            } else if let next = nextDoorCheck, now >= next {
+                nextDoorCheck = nil
+                lock(signal: Int(value))
+            }
+
         case .done:
             break
         }
@@ -253,13 +307,32 @@ final class AutoLock {
     }
 
     private func lock(signal: Int) {
-        // One attempt per visit, whatever the outcome.
-        phase = .done
+        guard !checking else { return }
+        checking = true
         lockPendingUntil = nil
-        stopWatching()
-        link.note("Auto-lock: you've walked away (\(signal) dBm), checking the car")
+        let recheck = if case .doorOpen = phase { true } else { false }
+        if !recheck { link.note("Auto-lock: you've walked away (\(signal) dBm), checking the car") }
         Task {
-            if let reason = await vetoReason() {
+            let reason = await vetoReason(refresh: recheck)
+            checking = false
+            guard link.state == .ready, phase.mayLock else { return }
+            if reason == Self.doorOpen {
+                if recheck {
+                    nextDoorCheck = Date().addingTimeInterval(Self.doorRecheck)
+                } else {
+                    // The report may predate the door being shut: ask the car again straight away.
+                    phase = .doorOpen(until: Date().addingTimeInterval(Self.doorWait))
+                    countdown = nil
+                    nextDoorCheck = Date()
+                    link.note("Auto-lock: a door is open; locking once it's shut (up to 2 min)")
+                }
+                return
+            }
+            // One lock per visit, whatever the outcome.
+            phase = .done
+            nextDoorCheck = nil
+            stopWatching()
+            if let reason {
                 if reason == Self.alreadyLocked {
                     link.note("Auto-lock: the car is already locked")
                 } else {
@@ -268,6 +341,7 @@ final class AutoLock {
                 }
                 return
             }
+            if recheck { link.note("Auto-lock: the door is shut now") }
             do {
                 try await link.send(.lock)
                 if AppConfig.demo { DemoCar.apply(.lock) }
@@ -281,6 +355,7 @@ final class AutoLock {
     }
 
     private static let alreadyLocked = "already locked"
+    private static let doorOpen = "a door is open"
 
     /// Asks the server, as the car sees it now, whether it was left unlocked; notifies if so.
     private func checkLeftUnlocked() {
@@ -323,13 +398,15 @@ final class AutoLock {
     }
 
     /// Why not to lock, according to a fresh server report; nil to go ahead.
-    private func vetoReason() async -> String? {
-        let status = await fetchStatus() ?? cachedStatus()
-        guard let status, let at = status.receivedAt ?? status.updatedAt,
+    /// `refresh` asks the car for a new report first, falling back to the server's last one.
+    private func vetoReason(refresh: Bool = false) async -> String? {
+        var status = refresh ? await fetchStatus(refresh: true, timeout: Self.recheckTimeout) : nil
+        if status == nil { status = await fetchStatus() }
+        guard let status = status ?? cachedStatus(), let at = status.receivedAt ?? status.updatedAt,
               Date().timeIntervalSince(at) < Self.statusFreshness else { return nil }
         if status.powerOn == true { return "the car is on" }
         if let speed = status.speedKmh, speed > 0 { return "the car is moving" }
-        if status.anyDoorOpen == true || status.trunkOpen == true { return "a door is open" }
+        if status.anyDoorOpen == true || status.trunkOpen == true { return Self.doorOpen }
         if status.locked == true { return Self.alreadyLocked }
         return nil
     }
