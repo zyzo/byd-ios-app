@@ -208,7 +208,7 @@ struct BluetoothSheet: View {
                         Text("≈ \(AutoUnlock.label(autoLock.distance))").fontWeight(.semibold).foregroundStyle(Theme.accent)
                     }
                     Picker("Lock distance", selection: $autoLock.distance) {
-                        ForEach(AutoUnlock.distances, id: \.self) { Text(AutoUnlock.label($0)).tag($0) }
+                        ForEach(AutoLock.distances, id: \.self) { Text(AutoUnlock.label($0)).tag($0) }
                     }
                     .pickerStyle(.segmented)
                     Text("Approximate. Narrow it if it locks too late.")

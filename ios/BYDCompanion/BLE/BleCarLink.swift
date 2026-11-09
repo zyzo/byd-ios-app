@@ -68,6 +68,10 @@ final class BleCarLink: NSObject {
     var onLinkLost: [() -> Void] = []
     var onRSSI: [(Int) -> Void] = []
     private(set) var lastCommandAt: Date?
+    /// The previous process had a session open when iOS ended it, so its drop went unseen.
+    /// The first disconnect shortly after launch reports it as a lost link.
+    private(set) var orphanedSession = false
+    private let launchedAt = Date()
 
     private var central: CBCentralManager!
     private var peripheral: CBPeripheral?
@@ -87,6 +91,9 @@ final class BleCarLink: NSObject {
     private static let writeID = CBUUID(string: BleCodec.writeUUID)
     private static let notifyID = CBUUID(string: BleCodec.notifyUUID)
     private static let savedPeripheralKey = "ble.peripheral.id"
+    private static let sessionOpenKey = "ble.sessionOpen"
+    /// How soon after launch a disconnect can still be the orphaned session's.
+    private static let orphanWindow: TimeInterval = 30
     private static let restoreID = "car-link"
     private static let logger = Logger(subsystem: "byd-companion", category: "car-link")
     private static let logTime: DateFormatter = {
@@ -109,6 +116,8 @@ final class BleCarLink: NSObject {
             return
         }
         log = LinkLogFile.recent(60)
+        orphanedSession = UserDefaults.standard.bool(forKey: Self.sessionOpenKey)
+        UserDefaults.standard.set(false, forKey: Self.sessionOpenKey)
         key = BleKeyStore.load()
         hasKey = key != nil
         // The restore identifier lets iOS relaunch the app in the background for the car.
@@ -279,7 +288,10 @@ final class BleCarLink: NSObject {
             // Callers that keep looking set .searching again afterwards.
             state = .stopped
         }
-        if wasReady { onLinkLost.forEach { $0() } }
+        if wasReady {
+            UserDefaults.standard.set(false, forKey: Self.sessionOpenKey)
+            onLinkLost.forEach { $0() }
+        }
     }
 
     private func authenticate() {
@@ -320,6 +332,8 @@ final class BleCarLink: NSObject {
                 }
                 state = .ready
                 readySince = Date()
+                orphanedSession = false
+                UserDefaults.standard.set(true, forKey: Self.sessionOpenKey)
                 note("Bluetooth ready")
                 onReady.forEach { $0() }
             } catch is CancellationError {
@@ -436,7 +450,13 @@ extension BleCarLink: CBCentralManagerDelegate {
         MainActor.assumeIsolated {
             note("Disconnected")
             let wasFailure = if case .failed = state { true } else { false }
+            let orphaned = orphanedSession && state != .ready && Date().timeIntervalSince(launchedAt) < Self.orphanWindow
+            orphanedSession = false
             resetLink()
+            if orphaned {
+                note("The session from before iOS relaunched the app has ended")
+                onLinkLost.forEach { $0() }
+            }
             if wantsConnection && !wasFailure {
                 state = .searching
                 // Reconnect when the car comes back in range; iOS keeps this pending request.

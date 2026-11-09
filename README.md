@@ -184,12 +184,12 @@ The distances are rough guesses from signal strength: walls, pockets and bags ch
 
 In the Bluetooth sheet, turn on **Lock as I walk away**. It needs no location access: it only watches the Bluetooth signal while the phone is connected to the car.
 
-- Once the signal has been stronger than the chosen distance (50 cm to 5 m, default 3 m) for a moment, the app knows you were at the car.
-- When the signal then stays weaker than that for 8 seconds, it sends one Bluetooth lock, never through BYD's cloud, and a quiet notification tells you whether the car confirmed it. One lock per visit: it won't lock again until you've been at the car again.
+- Once the signal has been stronger than the chosen distance (50 cm to 2 m, default 2 m) for a moment, the app knows you were at the car.
+- When the signal then stays weaker than that for 3 seconds, it sends one Bluetooth lock, never through BYD's cloud, and a quiet notification tells you whether the car confirmed it. One lock per visit: it won't lock again until you've been at the car again.
 - If the Bluetooth link drops before that, it locks when the link comes back within 2 minutes, if you're still beyond the chosen distance.
-- Before locking it asks the server for the car's latest report. If that report is less than 5 minutes old and says the car is on, moving, or has a door or the trunk open, it doesn't lock and tells you why. If the car is already locked it stays quiet. An old or unreachable report never blocks the lock.
+- Before locking it asks the server for the car's latest report. If that report is less than 5 minutes old and says the car is on or moving, it doesn't lock and tells you why. If it says a door or the trunk is open, it waits: every 10 seconds it asks the car for a fresh report and locks as soon as the door is shut, giving up after 2 minutes or if you come back. If the car is already locked it stays quiet. An old or unreachable report never blocks the lock.
 - No auto-lock within 60 seconds of any Bluetooth command from the app or widget, so an unlock to grab something isn't undone straight away.
-- iOS suspends the app in the background, which pauses the signal readings, so a walk-away can go unseen. As a safety net, whenever the link drops without a lock that visit, the app asks the server for a fresh report. If the car is off and unlocked, a notification offers a **Lock** button (long-press it) that locks through BYD's cloud; if a door is open it only tells you. At most one such notification every 10 minutes.
+- iOS can suspend the app in the background, or end it while it's connected, so a walk-away can go unseen. When iOS relaunches an ended app for the link's drop, that counts as the link dropping. As a safety net, whenever the link drops without a lock that visit, the app asks the server for a fresh report. If the car is off and unlocked, a notification offers a **Lock** button (long-press it) that locks through BYD's cloud; if a door is open it only tells you. At most one such notification every 10 minutes.
 
 The Bluetooth sheet's **Recent events** are also written, with timestamps, to the system log (subsystem `byd-companion`) and to `Documents/link-log.txt` in the app's container. With the phone plugged into the Mac you can copy that file without root:
 
