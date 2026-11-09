@@ -228,6 +228,8 @@ class TripWatch:
             rt.is_charging,
             age_text(rt.timestamp),
         )
+        if last is not None and last["powerOn"] and not snapshot["powerOn"]:
+            start_gps_probe(snapshot["at"])
         return True
 
     def since(self, after: datetime | None) -> list[dict[str, Any]]:
@@ -237,6 +239,51 @@ class TripWatch:
 
 
 state.trips = TripWatch()
+
+
+# TEMPORARY MEASUREMENT (remove once answered): can BYD's cloud GPS give a trip's end location?
+# After each power-on -> power-off snapshot, ask for GPS at +0, +2 and +10 min and log one
+# "GPS probe" line per attempt. Coordinates are never logged. One probe sequence at a time.
+GPS_PROBE_OFFSETS = (0, 120, 600)
+_gps_probe_task: asyncio.Task | None = None
+
+
+def start_gps_probe(power_off_at: datetime) -> None:
+    global _gps_probe_task
+    if _gps_probe_task is not None and not _gps_probe_task.done():
+        log.info("GPS probe skipped: previous probe still running")
+        return
+    try:
+        _gps_probe_task = asyncio.get_running_loop().create_task(_gps_probe(power_off_at))
+    except RuntimeError:
+        log.info("GPS probe skipped: no event loop")
+
+
+async def _gps_probe(power_off_at: datetime) -> None:
+    started = time.monotonic()
+    for attempt, offset in enumerate(GPS_PROBE_OFFSETS, 1):
+        await asyncio.sleep(max(0.0, offset - (time.monotonic() - started)))
+        since_off = (utcnow() - power_off_at).total_seconds()
+        t0 = time.monotonic()
+        has_position, gps_at, error = False, None, "-"
+        try:
+            client = await ensure_client()
+            gps = await client.get_gps_info(state.vin)
+            has_position = gps.latitude is not None and gps.longitude is not None
+            gps_at = gps.gps_timestamp
+        except Exception as e:  # noqa: BLE001
+            error = f"{type(e).__name__}({getattr(e, 'code', '') or ''})"
+        log.info(
+            "GPS probe %d/%d: %.0fs after power-off, took %.1fs, position=%s, gpsTime=%s (%s), error=%s",
+            attempt,
+            len(GPS_PROBE_OFFSETS),
+            since_off,
+            time.monotonic() - t0,
+            "yes" if has_position else "no",
+            iso_utc(gps_at) if gps_at is not None else "none",
+            age_text(gps_at) if gps_at is not None else "-",
+            error,
+        )
 
 
 def _on_vehicle_info(vin: str, rt: VehicleRealtimeData) -> None:
