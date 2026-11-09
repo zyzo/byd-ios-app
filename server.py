@@ -244,14 +244,18 @@ state.trips = TripWatch()
 # TEMPORARY MEASUREMENT (remove once answered): can BYD's cloud GPS give a trip's end location?
 # After each power-on -> power-off snapshot, ask for GPS at +0, +2 and +10 min and log one
 # "GPS probe" line per attempt. Coordinates are never logged. One probe sequence at a time.
+# The last results are also kept in memory and listed under "gpsProbes" in GET /snapshots,
+# since the container's own log lines don't show in `wrangler tail`.
 GPS_PROBE_OFFSETS = (0, 120, 600)
 _gps_probe_task: asyncio.Task | None = None
+gps_probes: deque[dict[str, Any]] = deque(maxlen=300)
 
 
 def start_gps_probe(power_off_at: datetime) -> None:
     global _gps_probe_task
     if _gps_probe_task is not None and not _gps_probe_task.done():
         log.info("GPS probe skipped: previous probe still running")
+        gps_probes.append({"at": iso_utc(utcnow()), "powerOffAt": iso_utc(power_off_at), "skipped": True})
         return
     try:
         _gps_probe_task = asyncio.get_running_loop().create_task(_gps_probe(power_off_at))
@@ -283,6 +287,19 @@ async def _gps_probe(power_off_at: datetime) -> None:
             iso_utc(gps_at) if gps_at is not None else "none",
             age_text(gps_at) if gps_at is not None else "-",
             error,
+        )
+        gps_probes.append(
+            {
+                "at": iso_utc(utcnow()),
+                "powerOffAt": iso_utc(power_off_at),
+                "attempt": attempt,
+                "secondsAfterPowerOff": round(since_off),
+                "durationSeconds": round(time.monotonic() - t0, 1),
+                "position": has_position,
+                "gpsTimestamp": iso_utc(gps_at) if gps_at is not None else None,
+                "gpsAgeSeconds": round((utcnow() - gps_at).total_seconds()) if gps_at is not None else None,
+                "error": None if error == "-" else error,
+            }
         )
 
 
@@ -579,6 +596,7 @@ async def snapshots(since: str | None = None) -> dict:
     return {
         "snapshots": state.trips.since(parse_since(since)),
         "serverStartedAt": iso_utc(state.started_at),
+        "gpsProbes": list(gps_probes),  # TEMPORARY MEASUREMENT, see start_gps_probe
     }
 
 
