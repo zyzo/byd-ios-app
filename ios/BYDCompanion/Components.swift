@@ -6,6 +6,7 @@ struct ControlTile: View {
     var detail: String?
     var active = false
     var busy = false
+    var bluetooth = false
     let action: () -> Void
 
     var body: some View {
@@ -36,17 +37,20 @@ struct ControlTile: View {
             }
             .padding(.horizontal, 16)
             .frame(maxWidth: .infinity, minHeight: 68, alignment: .leading)
+            .bluetoothBadge(bluetooth && !busy, inset: 10)
             .contentShape(Rectangle())
         }
         .buttonStyle(RaisedButtonStyle(active: active))
         .disabled(busy)
         .accessibilityValue(detail ?? "")
+        .accessibilityHint(bluetooth ? "Sends over Bluetooth" : "")
     }
 }
 
 struct LockButton: View {
     let locked: Bool
     var busy = false
+    var bluetooth = false
     let action: () -> Void
 
     private var tint: Color { locked ? Theme.accent : Theme.warning }
@@ -73,11 +77,29 @@ struct LockButton: View {
             }
             .padding(14)
             .frame(maxWidth: .infinity, minHeight: 76, alignment: .leading)
+            .bluetoothBadge(bluetooth && !busy, inset: 14)
             .contentShape(Rectangle())
         }
         .buttonStyle(RaisedButtonStyle(active: !locked, tint: Theme.warning, cornerRadius: 24))
         .disabled(busy)
         .accessibilityLabel(locked ? "Car is locked. Unlock" : "Car is unlocked. Lock")
+        .accessibilityHint(bluetooth ? "Sends over Bluetooth" : "")
+    }
+}
+
+extension View {
+    /// The widget keys' Bluetooth badge: marks a key that will send over the Bluetooth key.
+    func bluetoothBadge(_ shown: Bool, inset: CGFloat) -> some View {
+        overlay(alignment: .topTrailing) {
+            if shown {
+                BluetoothRune()
+                    .stroke(Theme.accent, style: StrokeStyle(lineWidth: 1.5, lineCap: .round, lineJoin: .round))
+                    .frame(width: 7, height: 11)
+                    .padding(.top, inset)
+                    .padding(.trailing, inset + 2)
+                    .accessibilityHidden(true)
+            }
+        }
     }
 }
 

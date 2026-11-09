@@ -9,12 +9,20 @@ enum CarLinkState {
     private static let readyKey = "link.ready"
     private static let handoffKey = "link.handoff"
     private static let handoffDateKey = "link.handoffDate"
+    private static let widgetShowsKey = "link.widgetShows"
 
     /// True while the app holds an authenticated Bluetooth session with the car.
     /// Written by the app; the widget confirms it against the live Bluetooth connection.
     static var ready: Bool {
         get { defaults?.bool(forKey: readyKey) ?? false }
         set { defaults?.set(newValue, forKey: readyKey) }
+    }
+
+    /// Whether the widget last drew its keys with the Bluetooth badge. Written by the widget,
+    /// so the app can ask for a redraw when iOS dropped one or the widget looked too early.
+    static var widgetShowsBluetooth: Bool? {
+        get { defaults?.object(forKey: widgetShowsKey) as? Bool }
+        set { defaults?.set(newValue, forKey: widgetShowsKey) }
     }
 
     /// A command tapped on the widget while the car was reachable over Bluetooth,

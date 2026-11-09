@@ -118,10 +118,22 @@ final class BleCarLink: NSObject {
     }
 
     /// Tells the widget whether a Bluetooth session is up, and redraws it when that changes.
+    /// Checks again a few seconds later: iOS may drop the reload, or the widget may ask
+    /// iOS about the connection before it shows up there.
     private func publishReady() {
         let ready = state == .ready
         guard CarLinkState.ready != ready else { return }
         CarLinkState.ready = ready
+        WidgetCenter.shared.reloadAllTimelines()
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(5))
+            self?.refreshWidgetIfStale()
+        }
+    }
+
+    /// Redraws the widget if its Bluetooth badges don't match the link.
+    func refreshWidgetIfStale() {
+        guard CarLinkState.widgetShowsBluetooth != (state == .ready) else { return }
         WidgetCenter.shared.reloadAllTimelines()
     }
 

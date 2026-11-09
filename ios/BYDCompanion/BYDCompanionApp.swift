@@ -49,10 +49,12 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
 
     func applicationDidEnterBackground(_ application: UIApplication) {
         AppServices.shared.ble.note("App went to the background")
+        AppServices.shared.ble.refreshWidgetIfStale()
     }
 
     func applicationWillEnterForeground(_ application: UIApplication) {
         AppServices.shared.ble.note("App came to the foreground")
+        AppServices.shared.ble.refreshWidgetIfStale()
     }
 
     /// The Lock button on a left-unlocked notification: lock through the cloud, then say how it went.
