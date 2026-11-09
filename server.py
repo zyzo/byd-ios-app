@@ -46,8 +46,11 @@ logging.getLogger("httpx").setLevel(logging.WARNING)  # one line per fetch is lo
 
 APP_TOKEN = os.environ["APP_TOKEN"]
 SKIP_COMMAND_GATE = os.environ.get("BYD_SKIP_COMMAND_GATE", "").lower() in ("1", "true", "yes")
-# Ask the car for a report when the cache gets older than this (pushes reset the clock).
+# Ask the car for a report when the cache gets older than this (pushes reset the clock). The car
+# pushes almost nothing on its own, even while driving, so poll often while it is on or charging
+# (it is awake anyway) and rarely while parked, to spare its 12 V battery.
 POLL_MINUTES = float(os.environ.get("BYD_POLL_MINUTES", "15"))
+POLL_ACTIVE_MINUTES = float(os.environ.get("BYD_POLL_ACTIVE_MINUTES", "5"))
 # How long `?refresh=true` waits for a report newer than the trigger: MQTT first, then HTTP polls.
 REFRESH_MQTT_SECONDS = 12.0
 REFRESH_POLL_ATTEMPTS = 8
@@ -378,13 +381,26 @@ async def refresh_status(reason: str) -> bool:
     return await asyncio.shield(state.refresh_task)
 
 
+def poll_interval() -> float:
+    """Seconds without data before asking the car: short while it is on or charging, long while parked."""
+    rt = state.car.state.realtime if state.car is not None else None
+    active = rt is not None and bool(rt.is_vehicle_on or rt.is_charging)
+    return (POLL_ACTIVE_MINUTES if active else POLL_MINUTES) * 60
+
+
 async def poll_forever() -> None:
-    """Keeps the cache from going stale: a refresh at startup, then whenever no data arrived for POLL_MINUTES."""
+    """Keeps the cache from going stale: a refresh at startup, then whenever no data arrived for `poll_interval()`.
+
+    A car that doesn't answer is asked again only once the interval has passed since the last try.
+    """
+    last_try = 0.0
     while True:
         try:
+            interval = poll_interval()
             if state.received_at is None:
                 await refresh_status("startup")
-            elif (utcnow() - state.received_at).total_seconds() > POLL_MINUTES * 60:
+            elif (utcnow() - state.received_at).total_seconds() > interval and time.monotonic() - last_try > interval:
+                last_try = time.monotonic()
                 await refresh_status("periodic")
         except Exception as e:  # noqa: BLE001
             log.warning("Background refresh failed: %s", e)

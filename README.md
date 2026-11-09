@@ -76,7 +76,7 @@ The first deploy builds the container image and creates the Worker, the loop cop
 
 To ship a change, run `npm run deploy` again: it rebuilds the container image when `server.py` or `requirements.txt` changed and rolls out the Worker. The trip log's tables are created on first use, so no migration is needed.
 
-Logs: `npx wrangler tail` in `cloudflare/`. The server logs every push and poll with the age of the data.
+Logs: `npx wrangler tail` in `cloudflare/` shows only the Worker's own requests and the keepalive's `dataAgeSeconds`, not the server's own lines. To see how the car's reports arrive, `GET /snapshots` lists the recent ones with when the car made them, when the server got them, and whether by `push` or `poll`.
 
 If **Trunk** or **Windows** fail with "Remote command … blocked … reason=function_no_missing" or "learn_info_missing", pyBYD is refusing to send them because BYD's feature list for your car doesn't advertise them. That data is often incomplete. Set `BYD_SKIP_COMMAND_GATE=1` (in `.env`, or in the `vars` of `cloudflare/wrangler.jsonc`) to send them anyway; the app then shows what BYD answers.
 
@@ -106,7 +106,7 @@ Three more routes feed the trip log (the Cloudflare Worker pulls the first two o
 
 The petrol price is scraped from [webgia.com](https://webgia.com/gia-xang-dau/) and, when that fails, from the [vietfuel-api](https://vietfuel-api.tranqui.workers.dev/api/fuel-prices/petrolimex) and [thiennhat-gia-xang-dau](https://github.com/thiennhatgroup/thiennhat-gia-xang-dau) JSON mirrors. It is checked every 6 hours, hourly on Thursday afternoons and evenings (Vietnam time) when the state adjusts prices; when every source fails the last good value is served with `stale: true`.
 
-`GET /status?refresh=true` asks the car for a new report and waits for one that is newer than what the cache had (up to about 25 seconds), so it never returns BYD's old cached snapshot. If the car doesn't answer, it returns the cache with `stale: true`. The server also asks the car for a report a few seconds after every command, and whenever nothing has arrived for `BYD_POLL_MINUTES` (default 15), so the cache never gets older than that while the car is reachable.
+`GET /status?refresh=true` asks the car for a new report and waits for one that is newer than what the cache had (up to about 25 seconds), so it never returns BYD's old cached snapshot. If the car doesn't answer, it returns the cache with `stale: true`. The server also asks the car for a report a few seconds after every command, and whenever nothing has arrived for a while: `BYD_POLL_ACTIVE_MINUTES` (default 5) while the car is on or charging, `BYD_POLL_MINUTES` (default 15) while it is parked. The car sends almost nothing on its own, even while driving, so the cache is about that old at worst while the car is reachable. A car that doesn't answer is asked again only after another interval. The app asks the car for a new report itself when it opens and the server's copy is more than 5 minutes old.
 
 ### Trip log
 

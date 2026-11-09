@@ -27,7 +27,8 @@
     "BYD_LANGUAGE": "en",
     "BYD_TIME_ZONE": "Asia/Ho_Chi_Minh",
     "BYD_SKIP_COMMAND_GATE": "1",
-    "BYD_POLL_MINUTES": "15"
+    "BYD_POLL_MINUTES": "15",
+    "BYD_POLL_ACTIVE_MINUTES": "5"
   },
   "observability": { "enabled": true }
 }
