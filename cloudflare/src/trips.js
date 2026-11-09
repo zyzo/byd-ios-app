@@ -8,10 +8,12 @@ export const DEFAULT_EV_RATE = 0.17; // kWh per km, until enough all-electric tr
 export const EVENT_WINDOW_MS = 15 * 60 * 1000;
 export const CALIBRATION_READINGS = 3;
 export const CALIBRATION_TOLERANCE = 0.1;
+export const CHARGE_MIN_RISE = 5; // battery points gained while parked before it counts as a charge
+export const DEFAULT_CHARGE_EFFICIENCY = 0.9; // share of the charger's kWh that reaches the battery
 const ENERGY_INTERVAL_MS = 60 * 60 * 1000;
 const EVENT_RETENTION_DAYS = 7;
 
-const SCHEMA_VERSION = 3;
+const SCHEMA_VERSION = 4;
 
 const MIGRATIONS = [
   // v1
@@ -92,6 +94,27 @@ const MIGRATIONS = [
   // v3: what a refuel or a charge on the way really came to, as the person corrected it.
   `
   ALTER TABLE trips ADD COLUMN refills TEXT;
+  `,
+  // v4: charges while the car stood between two trips. kwh is what the charger delivered,
+  // estimated from the battery's rise; edit holds what the person says it really came to.
+  `
+  CREATE TABLE IF NOT EXISTS charges (
+    id TEXT PRIMARY KEY,
+    parked_at TEXT NOT NULL,
+    start_at TEXT NOT NULL,
+    end_at TEXT NOT NULL,
+    odometer_km REAL NOT NULL,
+    soc_start REAL NOT NULL,
+    soc_end REAL NOT NULL,
+    charging_seen INTEGER NOT NULL,
+    kwh REAL,
+    price_kwh REAL,
+    edit TEXT,
+    deleted_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS charges_end_at ON charges(end_at);
   `,
 ];
 
@@ -185,15 +208,57 @@ function closeTrip(open, snapshot, source) {
   };
 }
 
+// While the car stands between two trips: where the battery was when it stopped, and when the
+// car's charging flag came on and went off again, if it did.
+function parkFrom(at, socStart) {
+  return { startAt: at, socStart, chargeStartAt: null, chargeEndAt: null, chargingSeen: false };
+}
+
+function noteParked(parked, snapshot) {
+  if (snapshot.charging) {
+    parked.chargeStartAt ??= snapshot.at;
+    parked.chargeEndAt = null;
+    parked.chargingSeen = true;
+  } else if (parked.chargingSeen && !parked.chargeEndAt) {
+    parked.chargeEndAt = snapshot.at;
+  }
+}
+
+// The stop before `trip` was a charge if the battery stood at least CHARGE_MIN_RISE points
+// higher when the trip began than when the car stopped. The charging flag only dates it.
+function chargeBefore(parked, trip) {
+  if (!parked || !isNumber(parked.socStart) || !isNumber(trip.socStart)) return null;
+  if (trip.socStart - parked.socStart < CHARGE_MIN_RISE) return null;
+  return {
+    id: crypto.randomUUID(),
+    parkedAt: parked.startAt,
+    startAt: parked.chargeStartAt ?? parked.startAt,
+    endAt: parked.chargeEndAt ?? trip.startAt,
+    odometerKm: trip.odoStart,
+    socStart: parked.socStart,
+    socEnd: trip.socStart,
+    chargingSeen: parked.chargingSeen,
+  };
+}
+
 // Walks snapshots (ascending by `at`) and turns power-on → power-off pairs into trips.
 // `openTrip` is the trip still in progress from the previous run (or null); `prev` is the last
 // snapshot seen before this batch. Kilometres driven before a late power-on report belong to
 // the trip it opens; an odometer jump between two power-off reports (a drive the pushes missed
-// entirely) becomes a `coarse` trip. Returns the closed trips and the new cursor so the caller
-// can resume from exactly here next time.
-export function deriveTrips(snapshots, openTrip = null, prev = null) {
+// entirely) becomes a `coarse` trip. A battery that rose while the car stood between two trips
+// becomes a charge. Returns the closed trips, the charges and the new cursor so the caller can
+// resume from exactly here next time.
+export function deriveTrips(snapshots, openTrip = null, prev = null, parkedState = null) {
   const trips = [];
+  const charges = [];
   let open = openTrip;
+  let parked = parkedState;
+  const emit = (trip) => {
+    trips.push(trip);
+    const charge = chargeBefore(parked, trip);
+    if (charge) charges.push(charge);
+    parked = parkFrom(trip.endAt, trip.socEnd);
+  };
   for (const raw of snapshots) {
     const snapshot = normaliseSnapshot(raw);
     if (open) {
@@ -201,18 +266,21 @@ export function deriveTrips(snapshots, openTrip = null, prev = null) {
       if (snapshot.powerOn) {
         open.lastSnapshot = snapshot;
       } else {
-        if (snapshot.odometerKm - open.odoStart >= 1) trips.push(closeTrip(open, snapshot, "car"));
+        if (snapshot.odometerKm - open.odoStart >= 1) emit(closeTrip(open, snapshot, "car"));
         open = null;
       }
     } else if (snapshot.powerOn) {
       const late = prev && !prev.powerOn && snapshot.odometerKm - prev.odometerKm >= 1;
       open = late ? openAfterGap(prev, snapshot) : openFrom(snapshot);
     } else if (prev && snapshot.odometerKm - prev.odometerKm >= 1) {
-      trips.push(closeTrip(openFrom(prev), snapshot, "coarse"));
+      emit(closeTrip(openFrom(prev), snapshot, "coarse"));
+    } else {
+      parked ??= parkFrom(snapshot.at, snapshot.batteryPercent);
     }
+    if (!snapshot.powerOn && !open && parked) noteParked(parked, snapshot);
     prev = snapshot;
   }
-  return { trips, openTrip: open, prev };
+  return { trips, charges, openTrip: open, prev, parked };
 }
 
 // Median kWh/km of all-electric trips of 5 km or more; the seed until there are any.
@@ -443,6 +511,7 @@ const PUBLIC_SETTINGS = [
   "batterySource",
   "tankSource",
   "notifyOnTrip",
+  "chargeEfficiency",
 ];
 const DEFAULT_SETTINGS = {
   priceKwh: null,
@@ -452,6 +521,7 @@ const DEFAULT_SETTINGS = {
   batterySource: "model",
   tankSource: "model",
   notifyOnTrip: false,
+  chargeEfficiency: DEFAULT_CHARGE_EFFICIENCY,
 };
 
 export class TripStore {
@@ -462,6 +532,8 @@ export class TripStore {
     migrate(sql);
     // Up to v1, kilometres the car reported late became trips of their own: cut them again once.
     if (from === 1) this.rebuild();
+    // Before v4 nobody looked for charges between trips: find the ones already in the snapshots.
+    else if (from >= 2 && from < 4) this.backfillCharges();
   }
 
   rows(query, ...bindings) {
@@ -509,6 +581,10 @@ export class TripStore {
         // Written together with the value above; on its own it can only reset to "model".
         const valueKey = key === "batterySource" ? "batteryKwh" : "tankLitres";
         if (value === "model" && !(valueKey in patch)) this.setSetting(key, "model");
+      } else if (key === "chargeEfficiency") {
+        if (value === null) this.setSetting(key, null);
+        else if (isNumber(value) && value >= 0.5 && value <= 1) this.setSetting(key, value);
+        else throw new HttpError(400, "chargeEfficiency must be between 0.5 and 1");
       } else if (key === "notifyOnTrip") {
         this.setSetting(key, Boolean(value));
       } else if (value === null || isNumber(value)) {
@@ -641,6 +717,7 @@ export class TripStore {
     const trips = this.tripRows({ since, limit, includeDeleted: Boolean(since) });
     return {
       trips: trips.map(publicTrip),
+      charges: this.chargeRows({ since, limit }),
       openTrip: this.openTripPublic(),
       settings: this.getSettings(),
       prices: this.getSetting("_prices", null),
@@ -699,6 +776,91 @@ export class TripStore {
     return rows.length ? tripFromRow(rows[0]) : null;
   }
 
+  // --- charges between trips ------------------------------------------------------------------
+
+  // Prices a charge as it is found: the charger's kWh from the battery's rise, the battery size
+  // and the charging efficiency of the day, at the day's electricity price.
+  insertCharge(charge, settings = this.getSettings()) {
+    const batteryKwh = settings.batteryKwh;
+    const efficiency = settings.chargeEfficiency ?? DEFAULT_CHARGE_EFFICIENCY;
+    const kwh = isNumber(batteryKwh) ? round(((charge.socEnd - charge.socStart) / 100) * batteryKwh / efficiency) : null;
+    const now = this.now().toISOString();
+    this.run(
+      `INSERT INTO charges (id, parked_at, start_at, end_at, odometer_km, soc_start, soc_end, charging_seen, kwh,
+         price_kwh, edit, deleted_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      charge.id,
+      charge.parkedAt,
+      charge.startAt,
+      charge.endAt,
+      charge.odometerKm,
+      charge.socStart,
+      charge.socEnd,
+      charge.chargingSeen ? 1 : 0,
+      kwh,
+      isNumber(settings.priceKwh) ? settings.priceKwh : null,
+      charge.edit ? JSON.stringify(charge.edit) : null,
+      charge.deletedAt ?? null,
+      now,
+      now,
+    );
+  }
+
+  chargeRows({ since = null, limit = 200 } = {}) {
+    const changedAt = this.getSetting("_tripsChangedAt", null);
+    if (since && changedAt && since < changedAt) since = null;
+    const rows = since
+      ? this.rows(
+          `SELECT * FROM charges WHERE end_at >= ? OR updated_at >= ? OR (deleted_at IS NOT NULL AND deleted_at >= ?)
+           ORDER BY end_at DESC LIMIT ?`,
+          since,
+          since,
+          since,
+          limit,
+        )
+      : this.rows(`SELECT * FROM charges WHERE deleted_at IS NULL ORDER BY end_at DESC LIMIT ?`, limit);
+    return rows.map(chargeFromRow);
+  }
+
+  /// Stores what a charge really came to (kWh from the charger, dong paid); null for both goes
+  /// back to the estimate.
+  editCharge(id, { amount = null, cost = null } = {}) {
+    for (const value of [amount, cost]) {
+      if (value !== null && !(isNumber(value) && value > 0)) {
+        throw new HttpError(400, "amount and cost must be positive numbers or null");
+      }
+    }
+    if (!this.rows(`SELECT 1 AS x FROM charges WHERE id = ?`, id).length) return null;
+    const edit = amount === null && cost === null ? null : JSON.stringify({ amount, cost });
+    this.run(`UPDATE charges SET edit = ?, updated_at = ? WHERE id = ?`, edit, this.now().toISOString(), id);
+    return chargeFromRow(this.rows(`SELECT * FROM charges WHERE id = ?`, id)[0]);
+  }
+
+  deleteCharge(id) {
+    if (!this.rows(`SELECT 1 AS x FROM charges WHERE id = ?`, id).length) return false;
+    const now = this.now().toISOString();
+    this.run(`UPDATE charges SET deleted_at = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL`, now, now, id);
+    return true;
+  }
+
+  // Finds the charges in every stored snapshot, without touching the trips, and leaves the
+  // cursor knowing where the car stands now. Charges already stored at the same odometer stay.
+  backfillCharges() {
+    const cursor = this.getSetting("_cursor", {});
+    if (!cursor.lastAt) return 0;
+    const snapshots = this.rows(`SELECT * FROM snapshots WHERE at <= ? ORDER BY at`, cursor.lastAt).map(snapshotFromRow);
+    const result = deriveTrips(snapshots);
+    const known = new Set(this.rows(`SELECT odometer_km FROM charges`).map((r) => r.odometer_km));
+    const settings = this.getSettings();
+    let inserted = 0;
+    for (const charge of result.charges) {
+      if (known.has(charge.odometerKm)) continue;
+      this.insertCharge(charge, settings);
+      inserted += 1;
+    }
+    this.setSetting("_cursor", { ...cursor, parked: result.parked });
+    return inserted;
+  }
+
   /// Corrects a mistyped electricity price on stored trips: every trip priced at `fromPriceKwh`
   /// is re-priced at `toPriceKwh`. Trips priced at any other rate keep theirs.
   repriceTrips({ fromPriceKwh, toPriceKwh } = {}) {
@@ -706,11 +868,11 @@ export class TripStore {
       throw new HttpError(400, "fromPriceKwh and toPriceKwh must be positive numbers");
     }
     const [{ n }] = this.rows(`SELECT COUNT(*) AS n FROM trips WHERE price_kwh = ?`, fromPriceKwh);
-    if (n > 0) {
-      this.run(`UPDATE trips SET price_kwh = ? WHERE price_kwh = ?`, toPriceKwh, fromPriceKwh);
-      this.setSetting("_tripsChangedAt", this.now().toISOString());
-    }
-    return { updated: n };
+    const [{ n: charges }] = this.rows(`SELECT COUNT(*) AS n FROM charges WHERE price_kwh = ?`, fromPriceKwh);
+    if (n > 0) this.run(`UPDATE trips SET price_kwh = ? WHERE price_kwh = ?`, toPriceKwh, fromPriceKwh);
+    if (charges > 0) this.run(`UPDATE charges SET price_kwh = ? WHERE price_kwh = ?`, toPriceKwh, fromPriceKwh);
+    if (n > 0 || charges > 0) this.setSetting("_tripsChangedAt", this.now().toISOString());
+    return { updated: n, charges };
   }
 
   // --- phones and events -------------------------------------------------------------------
@@ -783,19 +945,32 @@ export class TripStore {
 
   // Derives every trip again from the stored snapshots, after a change to how trips are cut.
   // The old rows are soft-deleted so the app drops them on its next refresh; a new trip that
-  // ends where one the person deleted ended stays deleted.
+  // ends where one the person deleted ended stays deleted. Charges are found again the same
+  // way, keeping the corrections and deletions made at the same odometer reading.
   rebuild() {
     const now = this.now().toISOString();
     const deletedEnds = new Set(
       this.rows(`SELECT odo_end FROM trips WHERE deleted_at IS NOT NULL`).map((r) => r.odo_end),
     );
     const replaced = this.rows(`SELECT COUNT(*) AS n FROM trips WHERE deleted_at IS NULL`)[0].n;
+    const chargeEdits = this.rows(`SELECT odometer_km, edit FROM charges WHERE deleted_at IS NULL AND edit IS NOT NULL`);
+    const deletedCharges = this.rows(
+      `SELECT odometer_km FROM charges WHERE deleted_at IS NOT NULL AND odometer_km NOT IN
+         (SELECT odometer_km FROM charges WHERE deleted_at IS NULL)`,
+    );
     this.run(`UPDATE trips SET deleted_at = ? WHERE deleted_at IS NULL`, now);
+    this.run(`UPDATE charges SET deleted_at = ?, updated_at = ? WHERE deleted_at IS NULL`, now, now);
     this.run(`UPDATE phone_events SET trip_id = NULL`);
     this.setSetting("_cursor", {});
     const trips = this.deriveNewTrips();
     for (const odoEnd of deletedEnds) {
       this.run(`UPDATE trips SET deleted_at = ? WHERE deleted_at IS NULL AND odo_end = ?`, now, odoEnd);
+    }
+    for (const { odometer_km, edit } of chargeEdits) {
+      this.run(`UPDATE charges SET edit = ? WHERE deleted_at IS NULL AND odometer_km = ?`, edit, odometer_km);
+    }
+    for (const { odometer_km } of deletedCharges) {
+      this.run(`UPDATE charges SET deleted_at = ? WHERE deleted_at IS NULL AND odometer_km = ?`, now, odometer_km);
     }
     const attached = this.attachPendingEvents();
     return { replaced, trips, attached };
@@ -886,13 +1061,14 @@ export class TripStore {
     const cursor = this.getSetting("_cursor", {});
     const snapshots = this.snapshotsAfter(cursor.lastAt ?? null);
     if (!snapshots.length) return 0;
-    const result = deriveTrips(snapshots, cursor.openTrip ?? null, cursor.prev ?? null);
+    const result = deriveTrips(snapshots, cursor.openTrip ?? null, cursor.prev ?? null, cursor.parked ?? null);
     const settings = this.getSettings();
     const prices = this.getSetting("_prices", null);
     for (const raw of result.trips) {
       const trip = computeTrip(raw, settings, prices);
       this.insertTrip(trip);
     }
+    for (const charge of result.charges) this.insertCharge(charge, settings);
     if (result.trips.length) {
       const recent = this.tripRows({ limit: 100 });
       this.setSetting("_evRate", round(learnEvRate(recent), 3));
@@ -901,6 +1077,7 @@ export class TripStore {
       lastAt: snapshots[snapshots.length - 1].at,
       openTrip: result.openTrip,
       prev: result.prev,
+      parked: result.parked,
     });
     return result.trips.length;
   }
@@ -956,6 +1133,15 @@ export class TripStore {
         if (!this.deleteTrip(tripMatch[1])) return json({ detail: "No such trip" }, 404);
         return json({ deleted: tripMatch[1] });
       }
+      const chargeMatch = path.match(/^\/charges\/([^/]+)$/);
+      if (chargeMatch && method === "PUT") {
+        const charge = this.editCharge(chargeMatch[1], await request.json());
+        return charge ? json(charge) : json({ detail: "No such charge" }, 404);
+      }
+      if (chargeMatch && method === "DELETE") {
+        if (!this.deleteCharge(chargeMatch[1])) return json({ detail: "No such charge" }, 404);
+        return json({ deleted: chargeMatch[1] });
+      }
       if (path === "/trips/reprice" && method === "POST") {
         return json(this.repriceTrips(await request.json()));
       }
@@ -963,7 +1149,7 @@ export class TripStore {
       if (path === "/settings" && method === "PUT") return json(this.putSettings(await request.json()));
       if (path === "/phones" && method === "GET") return json(this.getPhones());
       if (path === "/lease" && method === "POST") return json(this.lease(await request.json()));
-      if (["/trips", "/trips/events", "/trips/reprice", "/settings", "/phones", "/lease"].includes(path) || tripMatch || refillMatch) {
+      if (["/trips", "/trips/events", "/trips/reprice", "/settings", "/phones", "/lease"].includes(path) || tripMatch || refillMatch || chargeMatch) {
         return json({ detail: "Method not allowed" }, 405);
       }
       return null;
@@ -1032,6 +1218,23 @@ function tripFromRow(r) {
     carEndAt: r.car_end_at ?? r.end_at,
     gapStartAt: r.gap_start_at,
     refills: r.refills ? JSON.parse(r.refills) : null,
+  };
+}
+
+function chargeFromRow(r) {
+  return {
+    id: r.id,
+    parkedAt: r.parked_at,
+    startAt: r.start_at,
+    endAt: r.end_at,
+    odometerKm: r.odometer_km,
+    socStart: r.soc_start,
+    socEnd: r.soc_end,
+    chargingSeen: Boolean(r.charging_seen),
+    kwh: r.kwh,
+    priceKwh: r.price_kwh,
+    edit: r.edit ? JSON.parse(r.edit) : null,
+    deletedAt: r.deleted_at,
   };
 }
 

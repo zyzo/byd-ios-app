@@ -67,6 +67,22 @@ struct CarAPI {
         return try await send(request)
     }
 
+    /// Saves what a charge between trips really came to; nil for both goes back to the estimate.
+    func editCharge(_ chargeId: String, amount: Double?, cost: Double?) async throws -> Charge? {
+        if AppConfig.demo { return nil }
+        struct Body: Encodable { var amount: Double?; var cost: Double? }
+        var request = try post("charges/\(chargeId)", Body(amount: amount, cost: cost))
+        request.httpMethod = "PUT"
+        return try await send(request)
+    }
+
+    func deleteCharge(_ id: String) async throws {
+        if AppConfig.demo { await DemoTrips.deleteCharge(id); return }
+        var request = URLRequest(url: try endpoint("charges/\(id)"))
+        request.httpMethod = "DELETE"
+        let _: Empty = try await send(request)
+    }
+
     func postEvents(_ events: [PhoneEvent]) async throws {
         if AppConfig.demo { return }
         let body = PhoneEventsBody(phoneId: PhoneIdentity.id, phoneName: PhoneIdentity.name, events: events)
