@@ -71,11 +71,16 @@ enum DemoTrips {
     private static let evRate = 0.17
 
     private(set) static var trips: [Trip] = seed()
+    private(set) static var charges: [Charge] = seedCharges()
     private static var deleted: Set<String> = []
 
     static func response() async -> TripsResponse {
         try? await Task.sleep(for: .milliseconds(300))
-        return TripsResponse(trips: trips, openTrip: nil, settings: settings, serverTime: Date())
+        return TripsResponse(trips: trips, charges: charges, openTrip: nil, settings: settings, serverTime: Date())
+    }
+
+    static func deleteCharge(_ id: String) {
+        charges.removeAll { $0.id == id }
     }
 
     static func delete(_ id: String) {
@@ -164,6 +169,24 @@ enum DemoTrips {
             soc = socStart < 30 ? 82 : socStart
             fuel = fuelStart
         }
+        // Yesterday evening's drive ends low; it was charged overnight before this morning's.
+        for key in [\Trip.socStart, \Trip.socEnd] {
+            trips[1][keyPath: key] = trips[1][keyPath: key].map { $0 - 45 }
+        }
         return trips
+    }
+
+    /// Plugged in overnight between yesterday evening's drive and this morning's.
+    private static func seedCharges() -> [Charge] {
+        let calendar = Calendar.current
+        let today = calendar.startOfDay(for: Date())
+        guard trips.count > 1, let socStart = trips[1].socEnd, let socEnd = trips[0].socStart,
+              let parkedAt = trips[1].endAt,
+              let plugged = calendar.date(byAdding: .minute, value: -(24 * 60 - 22 * 60 - 10), to: today),
+              let full = calendar.date(bySettingHour: 5, minute: 40, second: 0, of: today) else { return [] }
+        let kwh = ((socEnd - socStart) / 100 * settings.batteryKwh / settings.chargeEfficiency * 100).rounded() / 100
+        return [Charge(id: "demo-charge-0", parkedAt: parkedAt, startAt: plugged, endAt: full,
+                       odometerKm: trips[0].odoStart ?? 0, socStart: socStart, socEnd: socEnd, chargingSeen: true,
+                       kwh: kwh, priceKwh: settings.priceKwh, edit: nil, deletedAt: nil)]
     }
 }

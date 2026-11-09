@@ -128,6 +128,8 @@ struct TripsSheet: View {
     @Environment(\.dismiss) private var dismiss
     @State private var week = Week(containing: Date())
     @State private var pendingDelete: Trip?
+    @State private var pendingChargeDelete: Charge?
+    @State private var editingCharge: Charge?
     @State private var detent: PresentationDetent = .large
 
     private var weeks: [Week] { TripMath.weeks(store.trips) }
@@ -139,7 +141,8 @@ struct TripsSheet: View {
                 Section {
                     TabView(selection: $week) {
                         ForEach(weeks) { w in
-                            WeekCard(week: w, trips: TripMath.trips(store.trips, in: w), previous: previous, next: next)
+                            WeekCard(week: w, trips: TripMath.trips(store.trips, in: w), charges: TripMath.charges(store.charges, in: w),
+                                     settings: store.settings, previous: previous, next: next)
                                 .tag(w)
                         }
                     }
@@ -162,14 +165,23 @@ struct TripsSheet: View {
                     }
                 }
 
-                ForEach(TripMath.byDay(weekTrips), id: \.day) { group in
+                ForEach(TripMath.byDay(weekTrips, store.unattachedCharges(TripMath.charges(store.charges, in: week))), id: \.day) { group in
                     Section {
-                        ForEach(group.trips) { trip in
-                            NavigationLink(value: trip.id) { TripRow(trip: trip, settings: store.settings) }
-                                .listRowBackground(Theme.card)
-                                .swipeActions(edge: .trailing) {
-                                    Button(role: .destructive) { pendingDelete = trip } label: { Label("Delete", systemImage: "trash") }
-                                }
+                        ForEach(group.entries) { entry in
+                            switch entry {
+                            case .trip(let trip):
+                                NavigationLink(value: trip.id) { TripRow(trip: trip, charge: store.charge(after: trip), settings: store.settings) }
+                                    .listRowBackground(Theme.card)
+                                    .swipeActions(edge: .trailing) {
+                                        Button(role: .destructive) { pendingDelete = trip } label: { Label("Delete", systemImage: "trash") }
+                                    }
+                            case .charge(let charge):
+                                Button { editingCharge = charge } label: { ChargeRow(charge: charge, settings: store.settings) }
+                                    .listRowBackground(Theme.card)
+                                    .swipeActions(edge: .trailing) {
+                                        Button(role: .destructive) { pendingChargeDelete = charge } label: { Label("Delete", systemImage: "trash") }
+                                    }
+                            }
                         }
                     } header: {
                         Text(TripMath.dayTitle(group.day)).font(.system(size: 13)).foregroundStyle(Theme.muted).textCase(nil)
@@ -198,6 +210,19 @@ struct TripsSheet: View {
                 Button("Delete trip", role: .destructive) {
                     if let trip = pendingDelete { Task { await store.delete(trip) } }
                     pendingDelete = nil
+                }
+            }
+            .confirmationDialog("Not a charge?", isPresented: Binding(get: { pendingChargeDelete != nil }, set: { if !$0 { pendingChargeDelete = nil } }), titleVisibility: .visible) {
+                Button("Delete charge", role: .destructive) {
+                    if let charge = pendingChargeDelete { Task { await store.delete(charge) } }
+                    pendingChargeDelete = nil
+                }
+            } message: {
+                Text("The battery level rose while the car was parked. Delete it if the car wasn't charged.")
+            }
+            .sheet(item: $editingCharge) { charge in
+                RefillEditor(refill: charge.refill(store.settings), remove: { Task { await store.delete(charge) } }) { amount, cost in
+                    Task { await store.editCharge(charge, amount: amount, cost: cost) }
                 }
             }
             .refreshable { await logger.sync() }
@@ -229,6 +254,8 @@ struct TripsSheet: View {
 struct WeekCard: View {
     let week: Week
     let trips: [Trip]
+    let charges: [Charge]
+    let settings: EnergySettings
     let previous: () -> Void
     let next: () -> Void
 
@@ -267,11 +294,20 @@ struct WeekCard: View {
                     Text("Cost unknown: set the prices behind the gear")
                 }
                 Spacer()
+                if let paid = chargesPaid {
+                    Text("Charging \(Money.kdong(paid))")
+                }
             }
             .font(.system(size: 12)).foregroundStyle(Theme.muted)
         }
         .padding(16)
         .accessibilityElement(children: .contain)
+    }
+
+    /// What the week's charges between trips came to, kept apart from the trips' energy cost.
+    private var chargesPaid: Double? {
+        let costs = charges.compactMap { $0.refill(settings).cost }
+        return costs.isEmpty ? nil : costs.reduce(0, +)
     }
 
     private static func label(_ day: Date) -> String { day.formatted(.dateTime.weekday(.abbreviated)) }
@@ -327,6 +363,7 @@ struct WeekCard: View {
 
 struct TripRow: View {
     let trip: Trip
+    var charge: Charge? = nil
     let settings: EnergySettings
 
     var body: some View {
@@ -353,6 +390,9 @@ struct TripRow: View {
             ForEach(trip.refills(settings), id: \.kind) { refill in
                 RefillBadge(refill: refill)
             }
+            if let charge {
+                RefillBadge(refill: charge.refill(settings))
+            }
         }
         .padding(.vertical, 4)
         .accessibilityElement(children: .combine)
@@ -365,6 +405,7 @@ struct TripDetail: View {
     @Environment(\.dismiss) private var dismiss
     @State private var confirmingDelete = false
     @State private var editing: Refill?
+    @State private var editingCharge: Charge?
 
     var body: some View {
         ScrollView {
@@ -412,6 +453,12 @@ struct TripDetail: View {
             }
             .presentationDetents([.medium])
         }
+        .sheet(item: $editingCharge) { charge in
+            RefillEditor(refill: charge.refill(store.settings), remove: { Task { await store.delete(charge) } }) { amount, cost in
+                Task { await store.editCharge(charge, amount: amount, cost: cost) }
+            }
+            .presentationDetents([.medium])
+        }
         .confirmationDialog("Delete this trip?", isPresented: $confirmingDelete, titleVisibility: .visible) {
             Button("Delete trip", role: .destructive) {
                 Task { await store.delete(trip) }
@@ -447,12 +494,17 @@ struct TripDetail: View {
                     legend("Petrol", trip.petrolKm)
                 }
             }
-            if !badges.isEmpty || !refills.isEmpty {
+            if !badges.isEmpty || !refills.isEmpty || chargeAfter != nil {
                 Divider().overlay(Theme.cardBorder)
                 ForEach(refills, id: \.kind) { refill in
                     Button { editing = refill } label: { RefillBadge(refill: refill, editable: true) }
                         .buttonStyle(.plain)
                         .accessibilityHint("Edit what it came to")
+                }
+                if let charge = chargeAfter {
+                    Button { editingCharge = charge } label: { RefillBadge(refill: charge.refill(store.settings), editable: true) }
+                        .buttonStyle(.plain)
+                        .accessibilityHint("Edit what the charge came to")
                 }
                 HStack(spacing: 6) {
                     ForEach(badges, id: \.text) { badge in
@@ -479,6 +531,7 @@ struct TripDetail: View {
     }
 
     private var refills: [Refill] { trip.refills(store.settings) }
+    private var chargeAfter: Charge? { store.charge(after: trip) }
 
     private struct Badge {
         var text: String
@@ -615,6 +668,7 @@ struct TripSettingsView: View {
     @State private var electricity = ""
     @State private var battery = ""
     @State private var tank = ""
+    @State private var efficiency = ""
     @State private var petrolOverride = ""
     @State private var editingPetrol = false
     @State private var loaded = false
@@ -675,6 +729,7 @@ struct TripSettingsView: View {
             Section("Your car") {
                 capacity("Battery (usable)", $battery, unit: "kWh", source: draft.batterySource, placeholder: "18.3")
                 capacity("Fuel tank", $tank, unit: "L", source: draft.tankSource, placeholder: "60")
+                capacity("Charging efficiency", $efficiency, unit: "%", subtitle: "of the charger's kWh that reach the battery", placeholder: "90")
             }
             .listRowBackground(Theme.card)
 
@@ -746,10 +801,14 @@ struct TripSettingsView: View {
     }
 
     private func capacity(_ label: String, _ text: Binding<String>, unit: String, source: EnergySettings.Source, placeholder: String) -> some View {
+        capacity(label, text, unit: unit, subtitle: source.label, placeholder: placeholder)
+    }
+
+    private func capacity(_ label: String, _ text: Binding<String>, unit: String, subtitle: String, placeholder: String) -> some View {
         HStack {
             VStack(alignment: .leading, spacing: 2) {
                 Text(label)
-                Text(source.label).font(.system(size: 12)).foregroundStyle(Theme.muted)
+                Text(subtitle).font(.system(size: 12)).foregroundStyle(Theme.muted)
             }
             Spacer()
             TextField(placeholder, text: text)
@@ -799,6 +858,7 @@ struct TripSettingsView: View {
         electricity = draft.priceKwh.map { ($0 / 1000).formatted(.number.precision(.fractionLength(1))) } ?? ""
         battery = draft.batteryKwh.formatted(.number.precision(.fractionLength(0...1)))
         tank = draft.tankLitres.formatted(.number.precision(.fractionLength(0...1)))
+        efficiency = (draft.chargeEfficiency * 100).formatted(.number.precision(.fractionLength(0)))
     }
 
     private func commit() {
@@ -811,6 +871,9 @@ struct TripSettingsView: View {
         if let value = Self.number(tank), value > 0, value != new.tankLitres {
             new.tankLitres = value
             new.tankSource = .manual
+        }
+        if let value = Self.number(efficiency), (50...100).contains(value) {
+            new.chargeEfficiency = value / 100
         }
         let name = phoneName.trimmingCharacters(in: .whitespaces)
         if !name.isEmpty, name != PhoneIdentity.name { PhoneIdentity.name = name }
@@ -826,6 +889,37 @@ struct TripSettingsView: View {
 
 extension Refill: Identifiable {
     var id: Kind { kind }
+}
+
+/// A charge while the car stood between two trips: "Charged 09:53–10:24 · 26 → 70 %", then what
+/// it came to. Tapping it opens the editor.
+struct ChargeRow: View {
+    let charge: Charge
+    let settings: EnergySettings
+
+    var body: some View {
+        let refill = charge.refill(settings)
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                Image(systemName: "bolt.fill").font(.system(size: 13)).foregroundStyle(Theme.accent)
+                Text("Charged").font(.system(size: 15, weight: .semibold)).foregroundStyle(Theme.text)
+                Text("· \(charge.timeRange)").font(.system(size: 15)).foregroundStyle(Theme.muted)
+                Spacer()
+                Text("\(Int(charge.socStart)) → \(Int(charge.socEnd)) %")
+                    .font(.system(size: 15, weight: .semibold)).foregroundStyle(Theme.text).monospacedDigit()
+            }
+            HStack(spacing: 6) {
+                if let summary = refill.summary {
+                    Text(summary).font(.system(size: 12)).foregroundStyle(Theme.muted).monospacedDigit()
+                }
+                Image(systemName: "pencil").font(.system(size: 11, weight: .semibold)).foregroundStyle(Theme.muted)
+            }
+        }
+        .padding(.vertical, 4)
+        .contentShape(Rectangle())
+        .accessibilityElement(children: .combine)
+        .accessibilityHint("Edit what the charge came to")
+    }
 }
 
 /// "⛽ Refuelled ≈ 33.6 L · ≈ 711kđ", amber like the car's other warnings about a trip.
@@ -855,10 +949,13 @@ struct RefillBadge: View {
 /// What a refuel or a charge really came to: litres or kWh, and what was paid in kđ.
 struct RefillEditor: View {
     let refill: Refill
+    /// Offers "Not a charge" for a charge found between trips.
+    var remove: (() -> Void)? = nil
     let save: (_ amount: Double?, _ cost: Double?) -> Void
     @Environment(\.dismiss) private var dismiss
     @State private var amount = ""
     @State private var paid = ""
+    @State private var confirmingRemove = false
 
     var body: some View {
         NavigationStack {
@@ -878,6 +975,19 @@ struct RefillEditor: View {
                         }
                     }
                 }
+                if let remove {
+                    Section {
+                        Button("Not a charge", role: .destructive) { confirmingRemove = true }
+                    }
+                }
+            }
+            .confirmationDialog("Not a charge?", isPresented: $confirmingRemove, titleVisibility: .visible) {
+                Button("Delete charge", role: .destructive) {
+                    remove?()
+                    dismiss()
+                }
+            } message: {
+                Text("The battery level rose while the car was parked. Delete it if the car wasn't charged.")
             }
             .navigationTitle(refill.kind == .fuel ? "Refuel" : "Charge")
             .navigationBarTitleDisplayMode(.inline)
@@ -904,6 +1014,7 @@ struct RefillEditor: View {
     }
 
     private var footer: String {
+        if let note = refill.note { return note }
         let gauge = refill.kind == .fuel ? "fuel gauge" : "battery level"
         guard refill.estimatedAmount != nil else {
             return "The \(gauge) didn't rise over the whole trip, so there's no estimate: enter what was added."
