@@ -24,12 +24,12 @@ struct HomeView: View {
         .scrollIndicators(.hidden)
         .background(Theme.background.ignoresSafeArea())
         .refreshable { await model.load(refresh: true) }
-        .task { await model.load() }
         .safeAreaInset(edge: .bottom) { errorBanner }
         .onChange(of: scenePhase, initial: true) { _, phase in
             if phase == .active {
                 model.ble.connect()
                 model.runHandoff()
+                Task { await model.loadOnOpen() }
             }
         }
         .sheet(isPresented: $showingTrips) {
@@ -152,7 +152,7 @@ struct HomeView: View {
 
     @ViewBuilder
     private func statusPill(_ s: CarStatus) -> some View {
-        if model.isRefreshing && model.stale {
+        if model.isRefreshing && (model.stale || model.readingCar) {
             chip {
                 ProgressView().controlSize(.mini).tint(Theme.text)
                 Text("Reading your car…")

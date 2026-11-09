@@ -10,6 +10,8 @@ final class CarViewModel {
     var isRefreshing = false
     /// `status` came from the cache and the server hasn't confirmed it yet this run.
     var stale = true
+    /// The app is asking the car for a fresh report on open; the server's copy stays usable meanwhile.
+    var readingCar = false
     var pending: Set<Control> = []
     var errorMessage: String?
     var importingKey = false
@@ -32,11 +34,25 @@ final class CarViewModel {
         }
     }
 
-    func load(refresh: Bool = false) async {
+    /// The server's copy can be up to its poll interval old, so ask the car itself when it is older than this on open.
+    private static let openRefreshAge: TimeInterval = 5 * 60
+
+    /// Shows the server's copy at once, then asks the car for a new report when that copy is old.
+    func loadOnOpen() async {
+        guard !isRefreshing else { return }
+        await load()
+        guard !stale, let updatedAt = status?.updatedAt,
+              Date().timeIntervalSince(updatedAt) > Self.openRefreshAge else { return }
+        readingCar = true
+        defer { readingCar = false }
+        await load(refresh: true, syncTrips: false)
+    }
+
+    func load(refresh: Bool = false, syncTrips: Bool = true) async {
         isRefreshing = true
         defer { isRefreshing = false }
         // The trip log syncs alongside, never holding up the car's status.
-        Task { await tripLogger.sync() }
+        if syncTrips { Task { await tripLogger.sync() } }
         do {
             status = try await api.status(refresh: refresh)
             stale = false
