@@ -42,7 +42,9 @@ final class TripStore {
             phones = mirror.phones
             leader = mirror.leader
             leaderSeenAt = mirror.leaderSeenAt
-            lastRefresh = mirror.lastRefresh
+            // Saved before the server sent what this build shows (charges, refills): pull everything
+            // once, since rows stored before then never come back in a pull of what changed since.
+            lastRefresh = mirror.version == Mirror.currentVersion ? mirror.lastRefresh : nil
             outbox = mirror.outbox
         }
     }
@@ -226,7 +228,8 @@ final class TripStore {
     private func save() {
         Mirror(
             trips: trips, charges: charges, openTrip: openTrip, settings: settings, prices: prices, phones: phones,
-            leader: leader, leaderSeenAt: leaderSeenAt, lastRefresh: lastRefresh, outbox: outbox
+            leader: leader, leaderSeenAt: leaderSeenAt, lastRefresh: lastRefresh, outbox: outbox,
+            version: Mirror.currentVersion
         ).save()
     }
 
@@ -242,6 +245,10 @@ final class TripStore {
         var leaderSeenAt: Date?
         var lastRefresh: Date?
         var outbox: [PhoneEvent]
+        var version: Int?
+
+        /// Bump when the server starts sending something older pulls lack, to force one full pull.
+        static let currentVersion = 2
 
         static var url: URL? {
             FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: AppConfig.appGroup)?
