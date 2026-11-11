@@ -412,6 +412,9 @@ struct DayKm: Identifiable {
     var day: Date
     var evKm: Double
     var petrolKm: Double
+    /// A charge between trips or on the way, and a refuel, that day: marked above the bar.
+    var charged = false
+    var refuelled = false
 
     var id: Date { day }
 }
@@ -454,10 +457,13 @@ enum TripMath {
     }
 
     /// Kilometres per day of the week, Monday first; days without trips are zero.
-    static func dailyKm(_ trips: [Trip], in week: Week) -> [DayKm] {
+    static func dailyKm(_ trips: [Trip], _ charges: [Charge] = [], in week: Week) -> [DayKm] {
         week.days.map { day in
             let same = trips.filter { Calendar.current.isDate($0.day, inSameDayAs: day) }
-            return DayKm(day: day, evKm: same.reduce(0) { $0 + $1.evKm }, petrolKm: same.reduce(0) { $0 + $1.petrolKm })
+            let charged = same.contains { $0.has(.chargedDuringTrip) }
+                || charges.contains { Calendar.current.isDate($0.day, inSameDayAs: day) }
+            return DayKm(day: day, evKm: same.reduce(0) { $0 + $1.evKm }, petrolKm: same.reduce(0) { $0 + $1.petrolKm },
+                         charged: charged, refuelled: same.contains { $0.has(.refuelledDuringTrip) })
         }
     }
 

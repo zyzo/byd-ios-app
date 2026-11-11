@@ -260,7 +260,7 @@ struct WeekCard: View {
     let next: () -> Void
 
     private var totals: TripTotals { TripTotals(trips) }
-    private var days: [DayKm] { TripMath.dailyKm(trips, in: week) }
+    private var days: [DayKm] { TripMath.dailyKm(trips, charges, in: week) }
     private var isCurrent: Bool { week == Week(containing: Date()) }
 
     var body: some View {
@@ -320,7 +320,9 @@ struct WeekCard: View {
                 .foregroundStyle(Theme.accent)
             BarMark(x: .value("Day", Self.label(day.day)), y: .value("Petrol km", day.petrolKm))
                 .foregroundStyle(Theme.fuel)
+                .annotation(position: .top, spacing: 3) { marks(day) }
         }
+        .chartYScale(domain: 0...yTop)
         .chartXAxis {
             AxisMarks(values: days.map { Self.label($0.day) }) { value in
                 if let label = value.as(String.self) {
@@ -338,6 +340,25 @@ struct WeekCard: View {
         .chartLegend(.hidden)
         .frame(height: 140)
         .accessibilityLabel("Kilometres per day, electric in teal and petrol in grey")
+    }
+
+    /// Room above the tallest bar for the charge and refuel marks.
+    private var yTop: Double {
+        let tallest = days.map { $0.evKm + $0.petrolKm }.max() ?? 0
+        return tallest > 0 ? tallest * 1.35 : 1
+    }
+
+    @ViewBuilder
+    private func marks(_ day: DayKm) -> some View {
+        if day.charged || day.refuelled {
+            VStack(spacing: 2) {
+                if day.refuelled { Image(systemName: "fuelpump.fill") }
+                if day.charged { Image(systemName: "bolt.fill") }
+            }
+            .font(.system(size: 10))
+            .foregroundStyle(Theme.warning)
+            .accessibilityLabel([day.charged ? "Charged" : nil, day.refuelled ? "Refuelled" : nil].compactMap { $0 }.joined(separator: ", "))
+        }
     }
 
     private func arrow(_ symbol: String, _ label: String, action: @escaping () -> Void) -> some View {
