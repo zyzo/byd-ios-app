@@ -262,8 +262,8 @@ test("calibration adopts a measured capacity after three readings within 10 %", 
 
 test("migrations are idempotent", () => {
   const sql = memorySql();
-  assert.equal(migrate(sql), 4);
-  assert.equal(migrate(sql), 4);
+  assert.equal(migrate(sql), 5);
+  assert.equal(migrate(sql), 5);
   const tables = sql.exec(`SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name`).toArray().map((r) => r.name);
   for (const name of ["snapshots", "trips", "charges", "phone_events", "phones", "settings", "leases", "schema_version"]) {
     assert.ok(tables.includes(name), name);
@@ -552,6 +552,50 @@ test("charging on the way stays on the trip, and a charge's flag going off ends 
   assert.equal(charge.startAt, at(30));
   assert.equal(charge.endAt, at(300));
   assert.equal(charge.socEnd, 90);
+});
+
+test("plugged in as the car stops: the charge follows the trip, not on its way", () => {
+  // 13 Nov: the power-off report already said charging.
+  const { trips, charges } = deriveTrips([
+    snap(0, 3894, 34, 40, true),
+    snap(50, 3903, 27, 40, false, { charging: true }),
+    snap(80, 3903, 77, 40, false),
+    snap(110, 3903, 77, 40, true),
+    snap(130, 3906, 75, 40, false),
+  ]);
+  assert.deepEqual(trips.map((t) => t.chargedSeen), [false, false]);
+  assert.equal(charges.length, 1);
+  assert.equal(charges[0].startAt, at(50));
+
+  // Charging reported while still on, then switched off where it stood.
+  const stoppedThere = deriveTrips([
+    snap(0, 1000, 50, 40, true),
+    snap(30, 1010.4, 40, 40, true, { charging: true }),
+    snap(32, 1010.6, 40, 40, false, { charging: true }),
+  ]);
+  assert.equal(stoppedThere.trips[0].chargedSeen, false);
+});
+
+test("upgrading to v5 drops the on-the-way flag a following charge took over", () => {
+  const sql = memorySql();
+  const store = new TripStore(sql);
+  const insert = (id, odoEnd, endAt, flags) =>
+    store.run(
+      `INSERT INTO trips (id, start_at, end_at, car_end_at, odo_start, odo_end, flags, created_at) VALUES (?, ?, ?, ?, 0, ?, ?, ?)`,
+      id, at(0), endAt, endAt, odoEnd, JSON.stringify(flags), at(0),
+    );
+  insert("stop", 3903, at(50), ["chargedDuringTrip"]);
+  insert("road", 4000, at(200), ["chargedDuringTrip", "withoutPhone"]);
+  store.run(
+    `INSERT INTO charges (id, parked_at, start_at, end_at, odometer_km, soc_start, soc_end, charging_seen, created_at, updated_at)
+     VALUES ('c', ?, ?, ?, 3903, 27, 77, 1, ?, ?)`,
+    at(49), at(49), at(80), at(80), at(80),
+  );
+  store.run(`UPDATE schema_version SET version = 4`);
+  const upgraded = new TripStore(sql);
+  const flags = Object.fromEntries(store.rows(`SELECT id, flags FROM trips`).map((r) => [r.id, JSON.parse(r.flags)]));
+  assert.deepEqual(flags, { stop: [], road: ["chargedDuringTrip", "withoutPhone"] });
+  assert.ok(upgraded.getSetting("_tripsChangedAt"));
 });
 
 test("the stop before a missed drive is measured up to where that drive began", () => {

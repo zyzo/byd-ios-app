@@ -13,7 +13,7 @@ export const DEFAULT_CHARGE_EFFICIENCY = 0.9; // share of the charger's kWh that
 const ENERGY_INTERVAL_MS = 60 * 60 * 1000;
 const EVENT_RETENTION_DAYS = 7;
 
-const SCHEMA_VERSION = 4;
+const SCHEMA_VERSION = 5;
 
 const MIGRATIONS = [
   // v1
@@ -116,6 +116,15 @@ const MIGRATIONS = [
   );
   CREATE INDEX IF NOT EXISTS charges_end_at ON charges(end_at);
   `,
+  // v5: a trip whose car reported charging only as it stopped was flagged as charged on the way,
+  // and the same charge showed again after it. Drop the flag where a charge began by the trip's
+  // end at its odometer. The store has phones pull every trip again after it.
+  `
+  UPDATE trips SET flags = REPLACE(REPLACE(REPLACE(flags, '"chargedDuringTrip",', ''), ',"chargedDuringTrip"', ''), '"chargedDuringTrip"', '')
+    WHERE flags LIKE '%chargedDuringTrip%'
+    AND EXISTS (SELECT 1 FROM charges c WHERE c.deleted_at IS NULL AND c.odometer_km = trips.odo_end
+      AND c.start_at <= COALESCE(trips.car_end_at, trips.end_at));
+  `,
 ];
 
 function storedVersion(sql) {
@@ -173,6 +182,7 @@ function openFrom(snapshot) {
     socStart: snapshot.batteryPercent,
     fuelStart: snapshot.fuelPercent,
     chargedSeen: false,
+    chargedAtKm: null,
     lastSnapshot: snapshot,
   };
 }
@@ -191,6 +201,14 @@ function openAfterGap(prev, snapshot) {
   };
 }
 
+// Charging on the way only when the car drove on afterwards: charging seen as the car stops
+// (plugged in before it was switched off) is the charge that follows the trip, not part of it.
+// A trip opened before the odometer was kept only knows that charging was seen.
+function drovenAfterCharging(open, odoEnd) {
+  if (open.chargedAtKm != null) return odoEnd - open.chargedAtKm >= 1;
+  return Boolean(open.chargedSeen);
+}
+
 function closeTrip(open, snapshot, source) {
   return {
     id: crypto.randomUUID(),
@@ -203,7 +221,7 @@ function closeTrip(open, snapshot, source) {
     socEnd: snapshot.batteryPercent,
     fuelStart: open.fuelStart,
     fuelEnd: snapshot.fuelPercent,
-    chargedSeen: open.chargedSeen || snapshot.charging,
+    chargedSeen: drovenAfterCharging(open, snapshot.odometerKm),
     source,
   };
 }
@@ -262,7 +280,7 @@ export function deriveTrips(snapshots, openTrip = null, prev = null, parkedState
   for (const raw of snapshots) {
     const snapshot = normaliseSnapshot(raw);
     if (open) {
-      if (snapshot.charging) open.chargedSeen = true;
+      if (snapshot.charging) open.chargedAtKm ??= snapshot.odometerKm;
       if (snapshot.powerOn) {
         open.lastSnapshot = snapshot;
       } else {
@@ -534,6 +552,8 @@ export class TripStore {
     if (from === 1) this.rebuild();
     // Before v4 nobody looked for charges between trips: find the ones already in the snapshots.
     else if (from >= 2 && from < 4) this.backfillCharges();
+    // v5 took flags off stored trips: phones that pulled before must get every trip again.
+    if (from >= 1 && from < 5) this.setSetting("_tripsChangedAt", this.now().toISOString());
   }
 
   rows(query, ...bindings) {
