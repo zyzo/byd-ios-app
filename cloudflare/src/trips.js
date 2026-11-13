@@ -13,7 +13,7 @@ export const DEFAULT_CHARGE_EFFICIENCY = 0.9; // share of the charger's kWh that
 const ENERGY_INTERVAL_MS = 60 * 60 * 1000;
 const EVENT_RETENTION_DAYS = 7;
 
-const SCHEMA_VERSION = 5;
+const SCHEMA_VERSION = 6;
 
 const MIGRATIONS = [
   // v1
@@ -125,6 +125,12 @@ const MIGRATIONS = [
     AND EXISTS (SELECT 1 FROM charges c WHERE c.deleted_at IS NULL AND c.odometer_km = trips.odo_end
       AND c.start_at <= COALESCE(trips.car_end_at, trips.end_at));
   `,
+  // v6: no more charging on the way. The car is never left on for a whole charge, so charging
+  // the car reports is always the charge after the trip, found while it stands.
+  `
+  UPDATE trips SET flags = REPLACE(REPLACE(REPLACE(flags, '"chargedDuringTrip",', ''), ',"chargedDuringTrip"', ''), '"chargedDuringTrip"', '')
+    WHERE flags LIKE '%chargedDuringTrip%';
+  `,
 ];
 
 function storedVersion(sql) {
@@ -181,8 +187,6 @@ function openFrom(snapshot) {
     odoStart: snapshot.odometerKm,
     socStart: snapshot.batteryPercent,
     fuelStart: snapshot.fuelPercent,
-    chargedSeen: false,
-    chargedAtKm: null,
     lastSnapshot: snapshot,
   };
 }
@@ -201,14 +205,6 @@ function openAfterGap(prev, snapshot) {
   };
 }
 
-// Charging on the way only when the car drove on afterwards: charging seen as the car stops
-// (plugged in before it was switched off) is the charge that follows the trip, not part of it.
-// A trip opened before the odometer was kept only knows that charging was seen.
-function drovenAfterCharging(open, odoEnd) {
-  if (open.chargedAtKm != null) return odoEnd - open.chargedAtKm >= 1;
-  return Boolean(open.chargedSeen);
-}
-
 function closeTrip(open, snapshot, source) {
   return {
     id: crypto.randomUUID(),
@@ -221,7 +217,6 @@ function closeTrip(open, snapshot, source) {
     socEnd: snapshot.batteryPercent,
     fuelStart: open.fuelStart,
     fuelEnd: snapshot.fuelPercent,
-    chargedSeen: drovenAfterCharging(open, snapshot.odometerKm),
     source,
   };
 }
@@ -280,7 +275,6 @@ export function deriveTrips(snapshots, openTrip = null, prev = null, parkedState
   for (const raw of snapshots) {
     const snapshot = normaliseSnapshot(raw);
     if (open) {
-      if (snapshot.charging) open.chargedAtKm ??= snapshot.odometerKm;
       if (snapshot.powerOn) {
         open.lastSnapshot = snapshot;
       } else {
@@ -304,7 +298,7 @@ export function deriveTrips(snapshots, openTrip = null, prev = null, parkedState
 // Median kWh/km of all-electric trips of 5 km or more; the seed until there are any.
 export function learnEvRate(trips) {
   const rates = trips
-    .filter((t) => t.km >= 5 && t.litres === 0 && t.kwh > 0 && !t.flags?.includes("chargedDuringTrip"))
+    .filter((t) => t.km >= 5 && t.litres === 0 && t.kwh > 0)
     .map((t) => t.kwh / t.km);
   return rates.length ? median(rates) : DEFAULT_EV_RATE;
 }
@@ -321,9 +315,6 @@ export function computeTrip(trip, settings = {}, prices = null) {
   const litres = fuelDelta == null ? 0 : round((Math.max(0, fuelDelta) / 100) * tankLitres);
 
   const flags = [];
-  // Only the car's charging flag counts: on a hybrid the engine tops the battery up while
-  // driving, so a higher SoC at arrival is normal.
-  if (trip.chargedSeen) flags.push("chargedDuringTrip");
   if (fuelDelta != null && fuelDelta < 0) flags.push("refuelledDuringTrip");
   if (km > 0 && socDelta === 0 && (fuelDelta === 0 || fuelDelta == null)) flags.push("tooShortToMeasure");
   if (!trip.phoneId) flags.push("withoutPhone");
@@ -552,8 +543,8 @@ export class TripStore {
     if (from === 1) this.rebuild();
     // Before v4 nobody looked for charges between trips: find the ones already in the snapshots.
     else if (from >= 2 && from < 4) this.backfillCharges();
-    // v5 took flags off stored trips: phones that pulled before must get every trip again.
-    if (from >= 1 && from < 5) this.setSetting("_tripsChangedAt", this.now().toISOString());
+    // v5 and v6 took flags off stored trips: phones that pulled before must get every trip again.
+    if (from >= 1 && from < 6) this.setSetting("_tripsChangedAt", this.now().toISOString());
   }
 
   rows(query, ...bindings) {
@@ -768,7 +759,8 @@ export class TripStore {
     return true;
   }
 
-  /// Stores what a refuel ("fuel", litres) or a charge on the way ("charge", kWh) really came to,
+  /// Stores what a refuel ("fuel", litres) or, on trips from before v6, a charge on the way
+  /// ("charge", kWh) really came to,
   /// and what it cost in dong; null for both goes back to the app's estimate.
   editRefill(id, { kind, amount = null, cost = null } = {}) {
     if (kind !== "fuel" && kind !== "charge") throw new HttpError(400, 'kind must be "fuel" or "charge"');

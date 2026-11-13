@@ -6,7 +6,7 @@ import UIKit
 /// Energy comes from the battery and fuel percentages at departure and arrival.
 struct Trip: Codable, Identifiable, Equatable {
     enum Flag: String {
-        case chargedDuringTrip, refuelledDuringTrip, tooShortToMeasure, coarse
+        case refuelledDuringTrip, tooShortToMeasure, coarse
     }
 
     var id: String
@@ -33,7 +33,7 @@ struct Trip: Codable, Identifiable, Equatable {
     /// `car` (power on/off pair) or `coarse` (odometer jump with no pair).
     var source: String
     var deletedAt: Date?
-    /// What a refuel or a charge on the way really came to, where someone corrected the estimate.
+    /// What a refuel really came to, where someone corrected the estimate.
     var refills: TripRefills? = nil
 
     func has(_ flag: Flag) -> Bool { flags.contains(flag.rawValue) }
@@ -103,28 +103,20 @@ struct Refill: Equatable {
 }
 
 extension Trip {
-    /// The refuel and the charge on the way, if the car flagged either.
+    /// The refuel, if the car flagged one. Charges are never on the way: they show as the charge
+    /// after the trip, found while the car stood.
     func refills(_ settings: EnergySettings) -> [Refill] {
-        [Refill.Kind.fuel, .charge].compactMap { refill($0, settings) }
+        [refuel(settings)].compactMap { $0 }
     }
 
-    func refill(_ kind: Refill.Kind, _ settings: EnergySettings) -> Refill? {
-        let estimated: Double?
-        let price: Double?
-        switch kind {
-        case .fuel:
-            guard has(.refuelledDuringTrip) else { return nil }
-            estimated = Self.rise(fuelStart, fuelEnd).map { $0 / 100 * settings.tankLitres }
-            price = cost?.priceLitre
-        case .charge:
-            guard has(.chargedDuringTrip) else { return nil }
-            estimated = Self.rise(socStart, socEnd).map { $0 / 100 * settings.batteryKwh }
-            price = cost?.priceKwh
-        }
-        let edit = refills?[kind]
+    func refuel(_ settings: EnergySettings) -> Refill? {
+        guard has(.refuelledDuringTrip) else { return nil }
+        let estimated = Self.rise(fuelStart, fuelEnd).map { $0 / 100 * settings.tankLitres }
+        let price = cost?.priceLitre
+        let edit = refills?.fuel
         let amount = edit?.amount ?? estimated
         let cost = edit?.cost ?? both(amount, price).map { $0 * $1 }
-        return Refill(kind: kind, amount: amount, cost: cost,
+        return Refill(kind: .fuel, amount: amount, cost: cost,
                       amountEstimated: edit?.amount == nil, costEstimated: edit?.cost == nil,
                       estimatedAmount: estimated, price: price)
     }
@@ -412,7 +404,7 @@ struct DayKm: Identifiable {
     var day: Date
     var evKm: Double
     var petrolKm: Double
-    /// A charge between trips or on the way, and a refuel, that day: marked above the bar.
+    /// A charge between trips, and a refuel, that day: marked above the bar.
     var charged = false
     var refuelled = false
 
@@ -460,8 +452,7 @@ enum TripMath {
     static func dailyKm(_ trips: [Trip], _ charges: [Charge] = [], in week: Week) -> [DayKm] {
         week.days.map { day in
             let same = trips.filter { Calendar.current.isDate($0.day, inSameDayAs: day) }
-            let charged = same.contains { $0.has(.chargedDuringTrip) }
-                || charges.contains { Calendar.current.isDate($0.day, inSameDayAs: day) }
+            let charged = charges.contains { Calendar.current.isDate($0.day, inSameDayAs: day) }
             return DayKm(day: day, evKm: same.reduce(0) { $0 + $1.evKm }, petrolKm: same.reduce(0) { $0 + $1.petrolKm },
                          charged: charged, refuelled: same.contains { $0.has(.refuelledDuringTrip) })
         }

@@ -139,7 +139,7 @@ enum DemoTrips {
             (0, 8, 12, 25, 14, 2.3, 0, thisPhone, []),
             (1, 19, 5, 18, 9, 1.5, 0, thisPhone, []),
             (1, 7, 58, 5, 2, 0, 0, thisPhone, [.tooShortToMeasure]),
-            (2, 17, 50, 46, 38, 2.6, 1.8, nil, [.chargedDuringTrip]),
+            (2, 17, 50, 46, 38, 2.6, 1.8, nil, []),
             (3, 8, 5, 24, 13, 2.2, 0, thisPhone, []),
             (6, 10, 30, 95, 86, 3.1, 4.6, otherPhone, []),
             (8, 18, 20, 31, 21, 2.4, 0.4, thisPhone, []),
@@ -156,14 +156,13 @@ enum DemoTrips {
         for (i, r) in rows.enumerated() {
             let kwh = r.flags.contains(.tooShortToMeasure) ? 0 : r.kwh
             let litres = r.flags.contains(.tooShortToMeasure) ? 0 : r.l
-            let socAdded = r.flags.contains(.chargedDuringTrip) ? 20.0 : 0
             let fuelAdded = r.flags.contains(.refuelledDuringTrip) ? 45.0 : 0
-            let socStart = min(100, soc + (kwh / settings.batteryKwh * 100).rounded() - socAdded)
+            let socStart = min(100, soc + (kwh / settings.batteryKwh * 100).rounded())
             let fuelStart = min(100, fuel + (litres / settings.tankLitres * 100).rounded() - fuelAdded)
             trips.append(trip(
                 id: "demo-\(i)", start: at(daysAgo: r.days, r.h, r.m), minutes: r.min, km: r.km, kwh: kwh, litres: litres,
                 odoStart: odo, socStart: socStart, fuelStart: fuelStart, phone: r.phone, flags: r.flags,
-                source: r.flags.contains(.coarse) ? "coarse" : "car", socAdded: socAdded, fuelAdded: fuelAdded
+                source: r.flags.contains(.coarse) ? "coarse" : "car", fuelAdded: fuelAdded
             ))
             odo -= r.km
             soc = socStart < 30 ? 82 : socStart

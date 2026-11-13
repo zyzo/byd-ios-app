@@ -85,7 +85,7 @@ test("mixed trip splits the distance with the learnt EV rate", () => {
   assert.equal(trip.cost.perKm, Math.round(trip.cost.total / 100));
 });
 
-test("charged mid-trip: SoC rises, kWh clamps to zero and the trip is flagged", () => {
+test("charging reported while driving flags nothing: the charge comes after the trip", () => {
   const { trips } = deriveTrips([
     snap(0, 1000, 30, 50, true),
     snap(20, 1010, 25, 50, true, { charging: true }),
@@ -93,10 +93,7 @@ test("charged mid-trip: SoC rises, kWh clamps to zero and the trip is flagged", 
   ]);
   const trip = computeTrip(trips[0], settings, prices);
   assert.equal(trip.kwh, 0);
-  assert.ok(trip.flags.includes("chargedDuringTrip"));
-  assert.ok(!trip.flags.includes("tooShortToMeasure"));
-  // Charged trips never teach the EV rate.
-  assert.equal(learnEvRate([{ ...trip, km: 30 }]), DEFAULT_EV_RATE);
+  assert.deepEqual(trip.flags, ["withoutPhone"]);
 });
 
 test("refuelled during trip and too-short trips are flagged", () => {
@@ -262,8 +259,8 @@ test("calibration adopts a measured capacity after three readings within 10 %", 
 
 test("migrations are idempotent", () => {
   const sql = memorySql();
-  assert.equal(migrate(sql), 5);
-  assert.equal(migrate(sql), 5);
+  assert.equal(migrate(sql), 6);
+  assert.equal(migrate(sql), 6);
   const tables = sql.exec(`SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name`).toArray().map((r) => r.name);
   for (const name of ["snapshots", "trips", "charges", "phone_events", "phones", "settings", "leases", "schema_version"]) {
     assert.ok(tables.includes(name), name);
@@ -500,7 +497,6 @@ const chargedNov7 = [
 test("a battery 44 points higher after standing between trips is a charge, dated by the charging flag", () => {
   const { trips, charges, parked } = deriveTrips(chargedNov7);
   assert.equal(trips.length, 2);
-  assert.deepEqual(trips.map((t) => t.chargedSeen), [false, false]);
   assert.equal(charges.length, 1);
   const { id, ...charge } = charges[0];
   assert.ok(id);
@@ -531,16 +527,7 @@ test("a rise under 5 points is the gauge settling; 5 points without the flag is 
   assert.equal(charge.socEnd - charge.socStart, 5);
 });
 
-test("charging on the way stays on the trip, and a charge's flag going off ends it", () => {
-  const onTheWay = deriveTrips([
-    snap(0, 1000, 30, 40, false),
-    snap(10, 1000, 30, 40, true),
-    snap(40, 1010, 60, 40, true, { charging: true }),
-    snap(90, 1030, 60, 40, false),
-  ]);
-  assert.equal(onTheWay.charges.length, 0);
-  assert.equal(onTheWay.trips[0].chargedSeen, true);
-
+test("a charge's flag going off ends it", () => {
   const [charge] = deriveTrips([
     snap(0, 1000, 50, 40, true),
     snap(20, 1010, 40, 40, false),
@@ -563,20 +550,12 @@ test("plugged in as the car stops: the charge follows the trip, not on its way",
     snap(110, 3903, 77, 40, true),
     snap(130, 3906, 75, 40, false),
   ]);
-  assert.deepEqual(trips.map((t) => t.chargedSeen), [false, false]);
+  assert.ok(trips.every((t) => !t.flags?.includes("chargedDuringTrip")));
   assert.equal(charges.length, 1);
   assert.equal(charges[0].startAt, at(50));
-
-  // Charging reported while still on, then switched off where it stood.
-  const stoppedThere = deriveTrips([
-    snap(0, 1000, 50, 40, true),
-    snap(30, 1010.4, 40, 40, true, { charging: true }),
-    snap(32, 1010.6, 40, 40, false, { charging: true }),
-  ]);
-  assert.equal(stoppedThere.trips[0].chargedSeen, false);
 });
 
-test("upgrading to v5 drops the on-the-way flag a following charge took over", () => {
+test("upgrading drops every on-the-way charge flag from stored trips", () => {
   const sql = memorySql();
   const store = new TripStore(sql);
   const insert = (id, odoEnd, endAt, flags) =>
@@ -594,7 +573,7 @@ test("upgrading to v5 drops the on-the-way flag a following charge took over", (
   store.run(`UPDATE schema_version SET version = 4`);
   const upgraded = new TripStore(sql);
   const flags = Object.fromEntries(store.rows(`SELECT id, flags FROM trips`).map((r) => [r.id, JSON.parse(r.flags)]));
-  assert.deepEqual(flags, { stop: [], road: ["chargedDuringTrip", "withoutPhone"] });
+  assert.deepEqual(flags, { stop: [], road: ["withoutPhone"] });
   assert.ok(upgraded.getSetting("_tripsChangedAt"));
 });
 
