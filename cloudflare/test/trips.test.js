@@ -85,7 +85,7 @@ test("mixed trip splits the distance with the learnt EV rate", () => {
   assert.equal(trip.cost.perKm, Math.round(trip.cost.total / 100));
 });
 
-test("charged mid-trip: SoC rises, kWh clamps to zero and the trip is flagged", () => {
+test("charging reported while driving flags nothing: the charge comes after the trip", () => {
   const { trips } = deriveTrips([
     snap(0, 1000, 30, 50, true),
     snap(20, 1010, 25, 50, true, { charging: true }),
@@ -93,10 +93,7 @@ test("charged mid-trip: SoC rises, kWh clamps to zero and the trip is flagged", 
   ]);
   const trip = computeTrip(trips[0], settings, prices);
   assert.equal(trip.kwh, 0);
-  assert.ok(trip.flags.includes("chargedDuringTrip"));
-  assert.ok(!trip.flags.includes("tooShortToMeasure"));
-  // Charged trips never teach the EV rate.
-  assert.equal(learnEvRate([{ ...trip, km: 30 }]), DEFAULT_EV_RATE);
+  assert.deepEqual(trip.flags, ["withoutPhone"]);
 });
 
 test("refuelled during trip and too-short trips are flagged", () => {
@@ -262,10 +259,10 @@ test("calibration adopts a measured capacity after three readings within 10 %", 
 
 test("migrations are idempotent", () => {
   const sql = memorySql();
-  assert.equal(migrate(sql), 2);
-  assert.equal(migrate(sql), 2);
+  assert.equal(migrate(sql), 6);
+  assert.equal(migrate(sql), 6);
   const tables = sql.exec(`SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name`).toArray().map((r) => r.name);
-  for (const name of ["snapshots", "trips", "phone_events", "phones", "settings", "leases", "schema_version"]) {
+  for (const name of ["snapshots", "trips", "charges", "phone_events", "phones", "settings", "leases", "schema_version"]) {
     assert.ok(tables.includes(name), name);
   }
 });
@@ -398,7 +395,7 @@ test("upgrading from v1 re-cuts 5 Nov 2026: two drives, the second reported 36 m
   store.insertTrip(computeTrip({ id: "old", startAt: utc(17, 14, 51), endAt: utc(20, 40, 26), odoStart: 3784, odoEnd: 3788 }));
 
   // Back to v1, as the live store was before this change, then open it again.
-  for (const column of ["car_start_at", "car_end_at", "gap_start_at"]) sql.exec(`ALTER TABLE trips DROP COLUMN ${column}`);
+  for (const column of ["car_start_at", "car_end_at", "gap_start_at", "refills"]) sql.exec(`ALTER TABLE trips DROP COLUMN ${column}`);
   sql.exec(`UPDATE schema_version SET version = 1`);
   const upgraded = new TripStore(sql, { now });
   const trips = upgraded.listTrips().trips.reverse();
@@ -446,4 +443,232 @@ test("HTTP handler answers the trip routes and leaves the rest to the container"
   assert.equal(missing.status, 404);
   const bad = await store.handle(req("/settings", { method: "PUT", body: "{" }));
   assert.equal(bad.status, 400);
+});
+
+test("refill edits: stored per kind, cleared back to the estimate, and resent to phones", async () => {
+  let now = new Date(T0);
+  const store = new TripStore(memorySql(), { now: () => now });
+  store.run(
+    `INSERT INTO trips (id, start_at, end_at, odo_start, odo_end, kwh, litres, fuel_start, fuel_end, flags, created_at)
+     VALUES ('t', ?, ?, 0, 9, 1.3, 0, 5, 61, '["refuelledDuringTrip"]', ?)`,
+    at(0), at(50), at(50),
+  );
+  assert.equal(store.listTrips().trips[0].refills, null);
+  const lastPull = store.listTrips().serverTime;
+
+  now = new Date(T0 + 3600000);
+  const put = (id, body) =>
+    store.handle(new Request(`http://container/trips/${id}/refill`, { method: "PUT", body: JSON.stringify(body) }));
+  const edited = await (await put("t", { kind: "fuel", amount: 33.2, cost: 705000 })).json();
+  assert.deepEqual(edited.refills, { fuel: { amount: 33.2, cost: 705000 } });
+  await put("t", { kind: "charge", amount: null, cost: 40000 });
+  assert.deepEqual(store.listTrips().trips[0].refills, {
+    fuel: { amount: 33.2, cost: 705000 },
+    charge: { amount: null, cost: 40000 },
+  });
+  assert.equal(store.listTrips({ since: lastPull }).trips.length, 1);
+
+  await put("t", { kind: "charge" });
+  await put("t", { kind: "fuel", amount: null, cost: null });
+  assert.equal(store.listTrips().trips[0].refills, null);
+
+  assert.equal((await put("nope", { kind: "fuel", amount: 1 })).status, 404);
+  assert.equal((await put("t", { kind: "petrol", amount: 1 })).status, 400);
+  assert.equal((await put("t", { kind: "fuel", amount: -1 })).status, 400);
+});
+
+// 7 Nov 2026, Vietnam time: a short drive, a fast charge from 26 % to 70 % while parked, then
+// the next drive. The charging flag came on three minutes after the car stopped and was never
+// seen going off before the car was switched on again.
+const nov7 = (h, m, s = 0) => new Date(Date.UTC(2026, 10, 7, h - 7, m, s)).toISOString();
+const car = (time, odometerKm, batteryPercent, powerOn, charging = false) => ({
+  ...snap(0, odometerKm, batteryPercent, 61, powerOn, { charging }),
+  at: time,
+  receivedAt: time,
+});
+const chargedNov7 = [
+  car(nov7(9, 33, 36), 3809, 25, true),
+  car(nov7(9, 50, 3), 3811, 26, false),
+  car(nov7(9, 53, 40), 3811, 27, false, true),
+  car(nov7(10, 24, 47), 3811, 70, true),
+  car(nov7(10, 39, 54), 3814, 68, false),
+];
+
+test("a battery 44 points higher after standing between trips is a charge, dated by the charging flag", () => {
+  const { trips, charges, parked } = deriveTrips(chargedNov7);
+  assert.equal(trips.length, 2);
+  assert.equal(charges.length, 1);
+  const { id, ...charge } = charges[0];
+  assert.ok(id);
+  assert.deepEqual(charge, {
+    parkedAt: nov7(9, 50, 3),
+    startAt: nov7(9, 53, 40),
+    endAt: nov7(10, 24, 47),
+    odometerKm: 3811,
+    socStart: 26,
+    socEnd: 70,
+    chargingSeen: true,
+  });
+  assert.deepEqual(parked, { startAt: nov7(10, 39, 54), socStart: 68, chargeStartAt: null, chargeEndAt: null, chargingSeen: false });
+});
+
+test("a rise under 5 points is the gauge settling; 5 points without the flag is still a charge", () => {
+  const stop = (rise) => [
+    snap(0, 1000, 50, 40, true),
+    snap(20, 1010, 40, 40, false),
+    snap(200, 1010, 40 + rise, 40, true),
+    snap(220, 1020, 30 + rise, 40, false),
+  ];
+  assert.equal(deriveTrips(stop(4)).charges.length, 0);
+  const [charge] = deriveTrips(stop(5)).charges;
+  assert.equal(charge.chargingSeen, false);
+  assert.equal(charge.startAt, at(20));
+  assert.equal(charge.endAt, at(200));
+  assert.equal(charge.socEnd - charge.socStart, 5);
+});
+
+test("a charge's flag going off ends it", () => {
+  const [charge] = deriveTrips([
+    snap(0, 1000, 50, 40, true),
+    snap(20, 1010, 40, 40, false),
+    snap(30, 1010, 41, 40, false, { charging: true }),
+    snap(300, 1010, 90, 40, false),
+    snap(600, 1010, 90, 40, true),
+    snap(620, 1020, 85, 40, false),
+  ]).charges;
+  assert.equal(charge.startAt, at(30));
+  assert.equal(charge.endAt, at(300));
+  assert.equal(charge.socEnd, 90);
+});
+
+test("plugged in as the car stops: the charge follows the trip, not on its way", () => {
+  // 13 Nov: the power-off report already said charging.
+  const { trips, charges } = deriveTrips([
+    snap(0, 3894, 34, 40, true),
+    snap(50, 3903, 27, 40, false, { charging: true }),
+    snap(80, 3903, 77, 40, false),
+    snap(110, 3903, 77, 40, true),
+    snap(130, 3906, 75, 40, false),
+  ]);
+  assert.ok(trips.every((t) => !t.flags?.includes("chargedDuringTrip")));
+  assert.equal(charges.length, 1);
+  assert.equal(charges[0].startAt, at(50));
+});
+
+test("upgrading drops every on-the-way charge flag from stored trips", () => {
+  const sql = memorySql();
+  const store = new TripStore(sql);
+  const insert = (id, odoEnd, endAt, flags) =>
+    store.run(
+      `INSERT INTO trips (id, start_at, end_at, car_end_at, odo_start, odo_end, flags, created_at) VALUES (?, ?, ?, ?, 0, ?, ?, ?)`,
+      id, at(0), endAt, endAt, odoEnd, JSON.stringify(flags), at(0),
+    );
+  insert("stop", 3903, at(50), ["chargedDuringTrip"]);
+  insert("road", 4000, at(200), ["chargedDuringTrip", "withoutPhone"]);
+  store.run(
+    `INSERT INTO charges (id, parked_at, start_at, end_at, odometer_km, soc_start, soc_end, charging_seen, created_at, updated_at)
+     VALUES ('c', ?, ?, ?, 3903, 27, 77, 1, ?, ?)`,
+    at(49), at(49), at(80), at(80), at(80),
+  );
+  store.run(`UPDATE schema_version SET version = 4`);
+  const upgraded = new TripStore(sql);
+  const flags = Object.fromEntries(store.rows(`SELECT id, flags FROM trips`).map((r) => [r.id, JSON.parse(r.flags)]));
+  assert.deepEqual(flags, { stop: [], road: ["withoutPhone"] });
+  assert.ok(upgraded.getSetting("_tripsChangedAt"));
+});
+
+test("the stop before a missed drive is measured up to where that drive began", () => {
+  const { trips, charges } = deriveTrips([
+    snap(0, 1000, 50, 40, true),
+    snap(20, 1010, 40, 40, false),
+    snap(30, 1010, 41, 40, false, { charging: true }),
+    snap(400, 1010, 80, 40, false),
+    snap(500, 1025, 70, 40, false),
+  ]);
+  assert.deepEqual(trips.map((t) => t.source), ["car", "coarse"]);
+  assert.equal(charges.length, 1);
+  assert.equal(charges[0].socEnd, 80);
+  assert.equal(charges[0].endAt, at(400));
+});
+
+test("a charge is found across sync batches, priced, corrected, deleted and resent to phones", async () => {
+  let now = new Date(nov7(9, 51));
+  const store = new TripStore(memorySql(), { now: () => now });
+  store.putSettings({ batteryKwh: 18.3, priceKwh: 7000 });
+  store.insertSnapshots(chargedNov7.slice(0, 3));
+  store.deriveNewTrips();
+  assert.deepEqual(store.listTrips().charges, []);
+  const lastPull = store.listTrips().serverTime;
+
+  now = new Date(nov7(10, 45));
+  store.insertSnapshots(chargedNov7.slice(3));
+  store.deriveNewTrips();
+  const [charge] = store.listTrips().charges;
+  assert.equal(charge.kwh, 8.95); // 44 % of 18.3 kWh, over a 90 % efficient charge
+  assert.equal(charge.priceKwh, 7000);
+  assert.equal(charge.edit, null);
+  assert.equal(store.listTrips({ since: lastPull }).charges.length, 1);
+
+  now = new Date(nov7(11, 0));
+  const editedAt = store.listTrips().serverTime;
+  now = new Date(nov7(11, 5));
+  const req = (path, init) => store.handle(new Request(`http://container${path}`, init));
+  const put = (body) => req(`/charges/${charge.id}`, { method: "PUT", body: JSON.stringify(body) });
+  assert.deepEqual((await (await put({ cost: 65000 })).json()).edit, { amount: null, cost: 65000 });
+  assert.equal(store.listTrips({ since: editedAt }).charges[0].edit.cost, 65000);
+  assert.equal((await (await put({})).json()).edit, null);
+  assert.equal((await put({ cost: -1 })).status, 400);
+  assert.equal((await req("/charges/nope", { method: "PUT", body: "{}" })).status, 404);
+
+  assert.equal((await req(`/charges/${charge.id}`, { method: "DELETE" })).status, 200);
+  assert.deepEqual(store.listTrips().charges, []);
+  assert.ok(store.listTrips({ since: editedAt }).charges[0].deletedAt);
+});
+
+test("re-deriving keeps a charge's correction and a deleted charge stays deleted", () => {
+  const store = new TripStore(memorySql(), { now: () => new Date(nov7(12, 0)) });
+  store.putSettings({ batteryKwh: 18.3, priceKwh: 7000 });
+  store.insertSnapshots([
+    ...chargedNov7,
+    car(nov7(11, 0), 3814, 68, false, true),
+    car(nov7(11, 30), 3814, 80, true),
+    car(nov7(11, 45), 3820, 75, false),
+  ]);
+  store.deriveNewTrips();
+  const [second, first] = store.listTrips().charges;
+  assert.deepEqual([first.socStart, first.socEnd, second.socStart, second.socEnd], [26, 70, 68, 80]);
+  store.editCharge(first.id, { cost: 65000 });
+  store.deleteCharge(second.id);
+
+  store.rebuild();
+  const charges = store.listTrips().charges;
+  assert.equal(charges.length, 1);
+  assert.notEqual(charges[0].id, first.id);
+  assert.deepEqual(charges[0].edit, { amount: null, cost: 65000 });
+});
+
+test("upgrading from v3 finds the charges already in the snapshots, then keeps watching", () => {
+  const sql = memorySql();
+  const store = new TripStore(sql, { now: () => new Date(nov7(10, 45)) });
+  store.putSettings({ batteryKwh: 18.3, priceKwh: 7000 });
+  store.insertSnapshots(chargedNov7);
+  store.deriveNewTrips();
+  sql.exec(`DROP TABLE charges`);
+  const { parked, ...v3Cursor } = store.getSetting("_cursor");
+  store.setSetting("_cursor", v3Cursor);
+  sql.exec(`UPDATE schema_version SET version = 3`);
+
+  const upgraded = new TripStore(sql, { now: () => new Date(nov7(11, 0)) });
+  assert.deepEqual(upgraded.listTrips().charges.map((c) => [c.socStart, c.socEnd]), [[26, 70]]);
+  assert.equal(upgraded.listTrips().trips.length, 2);
+  upgraded.insertSnapshots([car(nov7(13, 0), 3814, 90, true), car(nov7(13, 20), 3820, 85, false)]);
+  upgraded.deriveNewTrips();
+  assert.deepEqual(upgraded.listTrips().charges.map((c) => [c.socStart, c.socEnd]), [[68, 90], [26, 70]]);
+});
+
+test("charging efficiency: a setting between 0.5 and 1", () => {
+  const store = new TripStore(memorySql());
+  assert.equal(store.getSettings().chargeEfficiency, 0.9);
+  assert.equal(store.putSettings({ chargeEfficiency: 0.87 }).chargeEfficiency, 0.87);
+  assert.throws(() => store.putSettings({ chargeEfficiency: 1.2 }), /between 0.5 and 1/);
 });

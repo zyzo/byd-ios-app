@@ -71,11 +71,16 @@ enum DemoTrips {
     private static let evRate = 0.17
 
     private(set) static var trips: [Trip] = seed()
+    private(set) static var charges: [Charge] = seedCharges()
     private static var deleted: Set<String> = []
 
     static func response() async -> TripsResponse {
         try? await Task.sleep(for: .milliseconds(300))
-        return TripsResponse(trips: trips, openTrip: nil, settings: settings, serverTime: Date())
+        return TripsResponse(trips: trips, charges: charges, openTrip: nil, settings: settings, serverTime: Date())
+    }
+
+    static func deleteCharge(_ id: String) {
+        charges.removeAll { $0.id == id }
     }
 
     static func delete(_ id: String) {
@@ -98,12 +103,13 @@ enum DemoTrips {
     /// A closed trip; cost at the sample prices, electric share from the kWh.
     static func trip(id: String, start: Date, minutes: Int, km: Double, kwh: Double, litres: Double,
                      odoStart: Double, socStart: Double, fuelStart: Double,
-                     phone: Phone?, flags: [Trip.Flag] = [], source: String = "car") -> Trip {
+                     phone: Phone?, flags: [Trip.Flag] = [], source: String = "car",
+                     socAdded: Double = 0, fuelAdded: Double = 0) -> Trip {
         let tooShort = flags.contains(.tooShortToMeasure)
         let evKm = tooShort ? 0 : (litres == 0 ? km : min(km, kwh / evRate))
         let petrolKm = tooShort ? 0 : km - evKm
-        let socEnd = max(0, socStart - (kwh / settings.batteryKwh * 100).rounded())
-        let fuelEnd = max(0, fuelStart - (litres / settings.tankLitres * 100).rounded())
+        let socEnd = max(0, socStart - (kwh / settings.batteryKwh * 100).rounded() + socAdded)
+        let fuelEnd = max(0, fuelStart - (litres / settings.tankLitres * 100).rounded() + fuelAdded)
         var cost: TripCost?
         if !tooShort, let priceKwh = settings.priceKwh, let petrol = prices.petrol {
             let total = kwh * priceKwh + litres * petrol.vndPerLitre
@@ -133,7 +139,7 @@ enum DemoTrips {
             (0, 8, 12, 25, 14, 2.3, 0, thisPhone, []),
             (1, 19, 5, 18, 9, 1.5, 0, thisPhone, []),
             (1, 7, 58, 5, 2, 0, 0, thisPhone, [.tooShortToMeasure]),
-            (2, 17, 50, 46, 38, 2.6, 1.8, nil, [.chargedDuringTrip]),
+            (2, 17, 50, 46, 38, 2.6, 1.8, nil, []),
             (3, 8, 5, 24, 13, 2.2, 0, thisPhone, []),
             (6, 10, 30, 95, 86, 3.1, 4.6, otherPhone, []),
             (8, 18, 20, 31, 21, 2.4, 0.4, thisPhone, []),
@@ -150,17 +156,36 @@ enum DemoTrips {
         for (i, r) in rows.enumerated() {
             let kwh = r.flags.contains(.tooShortToMeasure) ? 0 : r.kwh
             let litres = r.flags.contains(.tooShortToMeasure) ? 0 : r.l
-            let socStart = min(100, soc + (kwh / settings.batteryKwh * 100).rounded() + (r.flags.contains(.chargedDuringTrip) ? -20 : 0))
-            let fuelStart = min(100, fuel + (litres / settings.tankLitres * 100).rounded() + (r.flags.contains(.refuelledDuringTrip) ? -30 : 0))
+            let fuelAdded = r.flags.contains(.refuelledDuringTrip) ? 45.0 : 0
+            let socStart = min(100, soc + (kwh / settings.batteryKwh * 100).rounded())
+            let fuelStart = min(100, fuel + (litres / settings.tankLitres * 100).rounded() - fuelAdded)
             trips.append(trip(
                 id: "demo-\(i)", start: at(daysAgo: r.days, r.h, r.m), minutes: r.min, km: r.km, kwh: kwh, litres: litres,
                 odoStart: odo, socStart: socStart, fuelStart: fuelStart, phone: r.phone, flags: r.flags,
-                source: r.flags.contains(.coarse) ? "coarse" : "car"
+                source: r.flags.contains(.coarse) ? "coarse" : "car", fuelAdded: fuelAdded
             ))
             odo -= r.km
             soc = socStart < 30 ? 82 : socStart
             fuel = fuelStart
         }
+        // Yesterday evening's drive ends low; it was charged overnight before this morning's.
+        for key in [\Trip.socStart, \Trip.socEnd] {
+            trips[1][keyPath: key] = trips[1][keyPath: key].map { $0 - 45 }
+        }
         return trips
+    }
+
+    /// Plugged in overnight between yesterday evening's drive and this morning's.
+    private static func seedCharges() -> [Charge] {
+        let calendar = Calendar.current
+        let today = calendar.startOfDay(for: Date())
+        guard trips.count > 1, let socStart = trips[1].socEnd, let socEnd = trips[0].socStart,
+              let parkedAt = trips[1].endAt,
+              let plugged = calendar.date(byAdding: .minute, value: -(24 * 60 - 22 * 60 - 10), to: today),
+              let full = calendar.date(bySettingHour: 5, minute: 40, second: 0, of: today) else { return [] }
+        let kwh = ((socEnd - socStart) / 100 * settings.batteryKwh / settings.chargeEfficiency * 100).rounded() / 100
+        return [Charge(id: "demo-charge-0", parkedAt: parkedAt, startAt: plugged, endAt: full,
+                       odometerKm: trips[0].odoStart ?? 0, socStart: socStart, socEnd: socEnd, chargingSeen: true,
+                       kwh: kwh, priceKwh: settings.priceKwh, edit: nil, deletedAt: nil)]
     }
 }
