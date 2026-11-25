@@ -39,7 +39,6 @@ struct BluetoothSheet: View {
     var importing: Bool
     let importKey: () -> Void
     @Environment(\.dismiss) private var dismiss
-    @State private var showingIntro = false
 
     var body: some View {
         NavigationStack {
@@ -78,14 +77,6 @@ struct BluetoothSheet: View {
             .toolbar { Button("Done") { dismiss() } }
         }
         .presentationDetents([.medium, .large])
-        .sheet(isPresented: $showingIntro) {
-            AutoUnlockIntro {
-                showingIntro = false
-                autoUnlock.enable()
-            } cancel: {
-                showingIntro = false
-            }
-        }
         .task {
             // Live signal strength while the sheet is open, to help pick a distance.
             while !Task.isCancelled {
@@ -110,15 +101,7 @@ struct BluetoothSheet: View {
                 Spacer(minLength: 8)
                 Toggle("Unlock as I walk up", isOn: Binding(
                     get: { autoUnlock.isOn },
-                    set: { on in
-                        if !on {
-                            autoUnlock.disable()
-                        } else if autoUnlock.authorization == .authorizedAlways {
-                            autoUnlock.enable()
-                        } else {
-                            showingIntro = true
-                        }
-                    }
+                    set: { $0 ? autoUnlock.enable() : autoUnlock.disable() }
                 ))
                 .labelsHidden()
                 .tint(Theme.accent)
@@ -140,28 +123,11 @@ struct BluetoothSheet: View {
                     signalNow
                 }
                 .padding(.vertical, 4)
-                HStack(spacing: 6) {
-                    Text("Location access")
-                    Spacer()
-                    Image(systemName: "checkmark")
-                        .font(.footnote.weight(.bold))
-                        .foregroundStyle(Theme.accent)
-                    Text("Always").foregroundStyle(.secondary)
-                }
-            } else if autoUnlock.needsAlways {
-                VStack(alignment: .leading, spacing: 10) {
-                    Label("Needs location set to Always.", systemImage: "exclamationmark.triangle")
-                        .font(.subheadline)
-                        .symbolRenderingMode(.multicolor)
-                    Button("Open Settings", action: autoUnlock.openSettings)
-                        .fontWeight(.semibold)
-                }
-                .padding(.vertical, 4)
             }
         } header: {
             Text("Auto-unlock")
         } footer: {
-            Text("Only after you've been away and come back. Bluetooth only.")
+            Text("Only after the car has been out of Bluetooth range for \(Int(AutoUnlock.minAway / 60)) minutes. Bluetooth only, no location needed. Stops if you force-quit the app.")
         }
     }
 
@@ -229,63 +195,6 @@ struct BluetoothSheet: View {
 
     private var autoUnlockSubtitle: String {
         guard autoUnlock.isOn else { return "Off" }
-        guard autoUnlock.carLocation != nil else { return "On · connect once to learn where it's parked" }
         return "On · within about \(AutoUnlock.label(autoUnlock.distance))"
-    }
-}
-
-/// Explains why auto-unlock needs Always location, before iOS asks.
-struct AutoUnlockIntro: View {
-    let proceed: () -> Void
-    let cancel: () -> Void
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 22) {
-            Image(systemName: "lock.open")
-                .font(.system(size: 26, weight: .semibold))
-                .foregroundStyle(Theme.accent)
-                .frame(width: 56, height: 56)
-                .background(RoundedRectangle(cornerRadius: 18).fill(Theme.accent.opacity(0.15)))
-                .overlay(RoundedRectangle(cornerRadius: 18).strokeBorder(Theme.accent))
-            VStack(alignment: .leading, spacing: 8) {
-                Text("Unlock as you walk up").font(.system(size: 24, weight: .bold))
-                (Text("To do this, the app needs your location set to ") + Text("Always").bold() + Text("."))
-                    .foregroundStyle(Color(hex: 0xC9D1D9))
-            }
-            VStack(alignment: .leading, spacing: 14) {
-                point("mappin.and.ellipse", "Wakes up near the car.", "iOS tells the app when you get close to where the car is parked, even if the app is closed.")
-                point("wifi", "Unlocks only when you're close.", "Bluetooth checks you're within the distance you choose, after you've been away.")
-                point("checkmark.shield", "Stays on your iPhone.", "Your location is never sent anywhere.")
-            }
-            Spacer(minLength: 0)
-            VStack(spacing: 10) {
-                Button(action: proceed) {
-                    Text("Continue").font(.system(size: 17, weight: .semibold)).frame(maxWidth: .infinity, minHeight: 52)
-                }
-                .buttonStyle(.borderedProminent)
-                .tint(Theme.accent)
-                .foregroundStyle(Theme.background)
-                Button("Not now", action: cancel)
-                    .frame(maxWidth: .infinity, minHeight: 44)
-                    .foregroundStyle(Color(hex: 0xC9D1D9))
-            }
-        }
-        .padding(.horizontal, 20)
-        .padding(.top, 28)
-        .padding(.bottom, 12)
-        .presentationDetents([.large])
-        .presentationBackground(Color(hex: 0x161B20))
-        .preferredColorScheme(.dark)
-    }
-
-    private func point(_ icon: String, _ title: String, _ detail: String) -> some View {
-        HStack(alignment: .top, spacing: 12) {
-            Image(systemName: icon)
-                .font(.system(size: 18, weight: .semibold))
-                .foregroundStyle(Theme.accent)
-                .frame(width: 24)
-            (Text(title).bold().foregroundColor(Theme.text) + Text(" " + detail).foregroundColor(Color(hex: 0xC9D1D9)))
-                .font(.system(size: 15))
-        }
     }
 }

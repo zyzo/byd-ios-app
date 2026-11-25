@@ -172,17 +172,18 @@ Commands that aren't confirmed by the car within 3 seconds are reported, not ret
 
 ## 4. Auto-unlock (optional)
 
-In the Bluetooth sheet, turn on **Unlock as I walk up** and allow location **Always**.
+In the Bluetooth sheet, turn on **Unlock as I walk up**. It needs no location access: it only uses Bluetooth.
 
-- Each time the phone connects to or disconnects from the car, it remembers that spot and watches a ~150 m zone around it. iOS wakes the app there even if it's closed.
-- Leaving the zone while not connected arms auto-unlock. Driving away, connected the whole time, doesn't.
-- When you come back, the app reconnects and sends one Bluetooth unlock once the signal stays above the chosen distance (50 cm to 5 m) for 1.5 seconds. It never unlocks through the cloud, and a quiet notification tells you it happened.
+- When the Bluetooth link to the car drops, the app notes the time. Driving away, connected the whole time, never starts that clock.
+- iOS keeps the reconnect request pending and wakes the app when the car is back in range, even if the app is closed.
+- If the link was gone for at least 5 minutes, the app sends one Bluetooth unlock once the signal stays above the chosen distance (50 cm to 5 m) for 1.5 seconds. Shorter dropouts, such as the signal fading through a wall while you're at home, never unlock. It never unlocks through the cloud, and a quiet notification tells you it happened.
+- It can't run after you force-quit the app, until you open it again.
 
 The distances are rough guesses from signal strength: walls, pockets and bags change them. The Bluetooth sheet shows the live signal to help you pick one.
 
 ## 5. Auto-lock (optional)
 
-In the Bluetooth sheet, turn on **Lock as I walk away**. It needs no location access: it only watches the Bluetooth signal while the phone is connected to the car.
+In the Bluetooth sheet, turn on **Lock as I walk away**. Like auto-unlock, it needs no location access: it only watches the Bluetooth signal while the phone is connected to the car.
 
 - Once the signal has been stronger than the chosen distance (50 cm to 2 m, default 2 m) for a moment, the app knows you were at the car.
 - When the signal then stays weaker than that for 3 seconds, it sends one Bluetooth lock, never through BYD's cloud, and a quiet notification tells you whether the car confirmed it. One lock per visit: it won't lock again until you've been at the car again.
@@ -204,7 +205,7 @@ It locks only when the phone that holds the key walks away. If you leave the pho
 The home screen's **Trips** card shows this month's distance, energy and cost; tap it for the log. Nothing to set up: the server derives trips from the car's own reports (a power-on to power-off pair with the odometer moving), so drives are logged even when no phone is in the car.
 
 - **What's logged.** For each trip: the time, odometer, battery and fuel percentages at departure and arrival, from which the app shows kilometres, kWh, litres, the electric share and, when prices are known, the cost and cost per km. Each trip keeps the prices of its day, so old trips never change. Trips too short for the car's percentages to move show no energy or cost.
-- **With the phone.** When the phone connects to the car over Bluetooth it tells the server it left, and when the link drops, that it arrived, with the car's location when known. The server attaches that to the trip: exact times and which phone drove. Events wait on the phone until it's online, and about ten minutes after a drive iOS lets the app fetch the finished trip in the background. Trips driven without any phone show a barred-phone glyph.
+- **With the phone.** When the phone connects to the car over Bluetooth it tells the server it left, and when the link drops, that it arrived. The server attaches that to the trip: exact times and which phone drove. Events wait on the phone until it's online, and about ten minutes after a drive iOS lets the app fetch the finished trip in the background. Trips driven without any phone show a barred-phone glyph.
 - **Two phones.** Both read the same log. The phone connected to the car holds a short lease on it (renewed every 30 s) and is shown as driving; while another phone holds the lease, auto-unlock and auto-lock on this one stay quiet, so a passenger's phone never unlocks or locks the car. Each phone has a name, the device's by default, shown on the trips it drove.
 - **Settings** (the gear in the Trips sheet): your electricity price per kWh; the petrol price, fetched by the server from public Vietnamese sources (E10 RON 95-III, zone 1) with an override; the battery and tank sizes, seeded from the car model and editable; this phone's name; and a quiet notification when a trip is logged.
 

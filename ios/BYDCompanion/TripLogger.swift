@@ -1,12 +1,11 @@
 import BackgroundTasks
-import CoreLocation
 import Foundation
 import Observation
 import UIKit
 
 /// Tells the server when this phone gets in and out of the car, so trips get the exact
-/// departure time, the parking spots and the phone that drove. The server derives the
-/// trips themselves from the car's own reports; this only adds what the phone knows.
+/// departure time and the phone that drove. The server derives the trips themselves
+/// from the car's own reports; this only adds what the phone knows.
 ///
 /// - Bluetooth ready: a `departure` event, and a lease on the car (renewed every 30 s).
 /// - Link lost: an `arrival` event, then a background refresh about ten minutes later,
@@ -29,14 +28,12 @@ final class TripLogger {
 
     private let link: BleCarLink
     private let store: TripStore
-    private let carLocation: () -> CLLocationCoordinate2D?
     private var leaseRenewedAt: Date?
     private var knownTripIDs: Set<String>
 
-    init(link: BleCarLink, store: TripStore, carLocation: @escaping () -> CLLocationCoordinate2D?) {
+    init(link: BleCarLink, store: TripStore) {
         self.link = link
         self.store = store
-        self.carLocation = carLocation
         knownTripIDs = Set(store.trips.map(\.id))
 
         BGTaskScheduler.shared.register(forTaskWithIdentifier: Self.refreshTaskID, using: nil) { [weak self] task in
@@ -91,8 +88,7 @@ final class TripLogger {
     }
 
     private func enqueue(_ kind: PhoneEvent.Kind) {
-        let spot = carLocation()
-        store.enqueue(PhoneEvent(kind: kind, at: Date(), lat: spot?.latitude, lon: spot?.longitude))
+        store.enqueue(PhoneEvent(kind: kind, at: Date()))
         link.note("Trip log: \(kind.rawValue) noted")
     }
 
