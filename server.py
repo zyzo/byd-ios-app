@@ -923,10 +923,8 @@ async def refresh_after_command() -> None:
         log.warning("Refresh after command failed: %s", e)
 
 
-@app.post("/command/{name}", dependencies=[Depends(require_token)])
-async def command(name: str, body: ClimateRequest | None = None) -> dict:
-    if name not in COMMANDS:
-        raise HTTPException(status_code=404, detail=f"Unknown command {name}")
+async def run_command(name: str, body: ClimateRequest) -> bool:
+    """Sends one command and waits for BYD to confirm it. Returns whether it did."""
     send, projections = COMMANDS[name]
     client = await ensure_client()
     car = state.car
@@ -938,7 +936,7 @@ async def command(name: str, body: ClimateRequest | None = None) -> dict:
                 state.command_access = True
 
             async def run() -> None:
-                result = await send(client, state.vin, body or ClimateRequest())
+                result = await send(client, state.vin, body)
                 if not result.success:
                     raise NotConfirmed
 
@@ -948,11 +946,42 @@ async def command(name: str, body: ClimateRequest | None = None) -> dict:
             success = True
         except NotConfirmed:
             success = False
-        except (BydApiError, ValueError) as e:
+        except (BydApiError, ValueError):
             # BYD sometimes answers "Service error (1008)" although the car did act: ask it to report.
             asyncio.create_task(refresh_after_command())
-            raise HTTPException(status_code=502, detail=str(e)) from e
+            raise
     log.info("Command %s: %s", name, "confirmed" if success else "not confirmed")
     if name != "honk":
         asyncio.create_task(refresh_after_command())
+    return success
+
+
+# Commands accepted with wait=false, kept so they aren't garbage-collected mid-way.
+_background_commands: set[asyncio.Task] = set()
+
+
+async def _run_command_in_background(name: str, body: ClimateRequest) -> None:
+    try:
+        await run_command(name, body)
+    except Exception as e:  # noqa: BLE001
+        log.warning("Command %s failed: %s", name, e)
+
+
+@app.post("/command/{name}", dependencies=[Depends(require_token)])
+async def command(name: str, body: ClimateRequest | None = None, wait: bool = True) -> dict:
+    """With wait=false (the widget), answers as soon as the command is accepted and sends it
+    in the background: a widget extension is suspended long before BYD confirms anything."""
+    if name not in COMMANDS:
+        raise HTTPException(status_code=404, detail=f"Unknown command {name}")
+    body = body or ClimateRequest()
+    if not wait:
+        task = asyncio.create_task(_run_command_in_background(name, body))
+        _background_commands.add(task)
+        task.add_done_callback(_background_commands.discard)
+        log.info("Command %s accepted", name)
+        return {"command": name, "accepted": True}
+    try:
+        success = await run_command(name, body)
+    except (BydApiError, ValueError) as e:
+        raise HTTPException(status_code=502, detail=str(e)) from e
     return {"command": name, "success": success}

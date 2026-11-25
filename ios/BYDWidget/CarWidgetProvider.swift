@@ -5,9 +5,6 @@ struct CarEntry: TimelineEntry {
     var status: CarStatus?
     /// Set when the server couldn't be reached: the numbers shown are old.
     var offline = false
-    /// The command a widget button is sending right now, if any, and when it was tapped.
-    var pending: CarCommand?
-    var pendingSince = Date.now
     /// The app is connected to the car over Bluetooth: its keys open the app to send that way.
     var bluetooth = false
 }
@@ -33,12 +30,11 @@ struct CarProvider: TimelineProvider {
     func getTimeline(in context: Context, completion: @escaping (Timeline<CarEntry>) -> Void) {
         Task {
             let entry = await entry()
-            let next: Date
-            if entry.pending != nil {
-                // Check back soon in case the finishing reload is dropped.
-                next = .now.addingTimeInterval(5)
-            } else {
-                next = Calendar.current.date(byAdding: .minute, value: entry.offline ? 5 : 15, to: .now)!
+            var next = Calendar.current.date(byAdding: .minute, value: entry.offline ? 5 : 15, to: .now)!
+            if let overlayEnd = RecentCommands.overlayEnd {
+                // The keys show what a command should have done, unconfirmed: look again once
+                // that guess lapses, so a command the car didn't carry out doesn't linger.
+                next = min(next, overlayEnd.addingTimeInterval(5))
             }
             completion(Timeline(entries: [entry], policy: .after(next)))
         }
@@ -47,20 +43,6 @@ struct CarProvider: TimelineProvider {
     private func entry() async -> CarEntry {
         let bluetooth = await Self.bluetoothReady()
         CarLinkState.widgetShowsBluetooth = bluetooth
-        if let pending = RecentCommands.pending {
-            if let task = InflightCommand.task {
-                // A key was just tapped: redraw from what we already know, right away,
-                // so the loading ring doesn't wait for the server.
-                if let status = RecentCommands.lastKnown {
-                    return CarEntry(date: .now, status: status, pending: pending, pendingSince: RecentCommands.pendingSince, bluetooth: bluetooth)
-                }
-                await task.value
-            } else {
-                // The extension was restarted mid-command, so its fate is unknown.
-                // Not resent: the car may already have acted.
-                RecentCommands.pending = nil
-            }
-        }
         do {
             var status = try await api.status()
             RecentCommands.overlay(on: &status)
@@ -82,50 +64,20 @@ struct CarProvider: TimelineProvider {
     }
 }
 
-/// The command a widget key is sending, run in the extension after its intent has returned.
-enum InflightCommand {
-    static var task: Task<Void, Never>?
-
-    static func start(_ command: CarCommand) {
-        RecentCommands.pending = command
-        task = Task {
-            if (try? await CarAPI().run(command)) == true {
-                RecentCommands.record(command)
-            }
-            RecentCommands.pending = nil
-            task = nil
-            WidgetCenter.shared.reloadTimelines(ofKind: CarWidget.kind)
-        }
-    }
-}
-
 /// What the widget last sent and last saw, kept in the extension's own defaults.
 enum RecentCommands {
     private static let defaults = UserDefaults.standard
     private static let commandKey = "widget.lastCommand"
     private static let commandDateKey = "widget.lastCommandDate"
     private static let statusKey = "widget.lastStatus"
-    private static let pendingKey = "widget.pendingCommand"
-    private static let pendingDateKey = "widget.pendingCommandDate"
     /// BYD's cached status can lag a command by a while.
     private static let overlayWindow: TimeInterval = 90
 
-    /// The command being sent right now. Forgotten after 100 s in case an intent is killed mid-way.
-    static var pending: CarCommand? {
-        get {
-            guard let raw = defaults.string(forKey: pendingKey), let command = CarCommand(rawValue: raw) else { return nil }
-            let since = Date(timeIntervalSinceReferenceDate: defaults.double(forKey: pendingDateKey))
-            return Date.now.timeIntervalSince(since) < 100 ? command : nil
-        }
-        set {
-            defaults.set(newValue?.rawValue, forKey: pendingKey)
-            defaults.set(Date.now.timeIntervalSinceReferenceDate, forKey: pendingDateKey)
-        }
-    }
-
-    /// When the pending command was tapped.
-    static var pendingSince: Date {
-        Date(timeIntervalSinceReferenceDate: defaults.double(forKey: pendingDateKey))
+    /// When the last command stops being shown over the server's status, if it still is.
+    static var overlayEnd: Date? {
+        guard defaults.string(forKey: commandKey) != nil else { return nil }
+        let end = Date(timeIntervalSinceReferenceDate: defaults.double(forKey: commandDateKey)).addingTimeInterval(overlayWindow)
+        return end > .now ? end : nil
     }
 
     static func record(_ command: CarCommand) {

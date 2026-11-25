@@ -40,6 +40,22 @@ struct CarAPI {
         return result.success
     }
 
+    /// Hands a command to the server and returns once it is accepted, without waiting for
+    /// BYD to confirm it. For the widget, whose extension is suspended long before that.
+    func dispatch(_ command: CarCommand) async throws {
+        if AppConfig.demo {
+            await DemoCar.apply(command)
+            return
+        }
+        var components = URLComponents(url: try endpoint("command/\(command.rawValue)"), resolvingAgainstBaseURL: false)!
+        components.queryItems = [URLQueryItem(name: "wait", value: "false")]
+        var request = URLRequest(url: components.url!)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONEncoder().encode(ClimateBody(temperature: 21, minutes: 20))
+        let _: Empty = try await send(request, timeout: 20)
+    }
+
     // Trip log (see README, "Trip log"). The Worker answers these itself.
 
     func trips(since: Date? = nil) async throws -> TripsResponse {
@@ -154,10 +170,10 @@ struct CarAPI {
         return baseURL.appending(path: path)
     }
 
-    private func send<T: Decodable>(_ request: URLRequest) async throws -> T {
+    /// Realtime data and commands can take a while: BYD polls the car.
+    private func send<T: Decodable>(_ request: URLRequest, timeout: TimeInterval = 90) async throws -> T {
         var request = request
-        // Realtime data and commands can take a while: BYD polls the car.
-        request.timeoutInterval = 90
+        request.timeoutInterval = timeout
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
 
         let data: Data

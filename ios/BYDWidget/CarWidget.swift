@@ -105,25 +105,21 @@ struct CarWidgetView: View {
                 commandButton(locked ? "Locked" : "Lock",
                               systemImage: locked ? "lock.fill" : "lock.open.fill",
                               active: locked && lockKnown,
-                              control: .lock,
                               command: locked ? .unlock : .lock)
                 commandButton("Trunk",
                               systemImage: "car.side.rear.open",
                               active: s.trunkOpen ?? false,
-                              control: .trunk,
                               command: s.trunkOpen ?? false ? .trunkClose : .trunkOpen)
                 commandButton(s.acOn ?? false ? "A/C on" : "A/C",
                               systemImage: "snowflake",
                               active: s.acOn ?? false,
-                              control: .ac,
                               command: s.acOn ?? false ? .acStop : .acStart)
                 commandButton("Honk",
                               systemImage: "speaker.wave.3.fill",
                               active: false,
-                              control: .honk,
                               command: .honk)
             }
-            .disabled(entry.offline || entry.pending != nil)
+            .disabled(entry.offline)
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 18)
@@ -165,40 +161,23 @@ struct CarWidgetView: View {
         return parts.joined(separator: " · ")
     }
 
-    /// One key. While `entry.pending` is this control's command the key shows a filling ring;
-    /// while another one is pending it is dimmed (the row above disables all of them).
-    /// While the app is connected to the car over Bluetooth, keys the Bluetooth key can
+    /// One key. While the app is connected to the car over Bluetooth, keys the Bluetooth key can
     /// send carry a Bluetooth badge and open the app to send that way instead of the cloud.
-    private func commandButton(_ title: String, systemImage: String, active: Bool, control: Control, command: CarCommand) -> some View {
-        let loading = entry.pending?.control == control
-        let othersBusy = entry.pending != nil && !loading
+    private func commandButton(_ title: String, systemImage: String, active: Bool, command: CarCommand) -> some View {
         let bluetooth = entry.bluetooth && command.worksOverBluetooth
-        let label = Group {
-            if loading {
-                // Widgets are static snapshots: only a date-driven progress view moves.
-                ProgressView(timerInterval: entry.pendingSince...entry.pendingSince.addingTimeInterval(12),
-                             countsDown: false,
-                             label: { EmptyView() },
-                             currentValueLabel: { EmptyView() })
-                    .progressViewStyle(.circular)
-                    .tint(Theme.accent)
-                    .frame(width: 18, height: 18)
-            } else {
-                Image(systemName: systemImage)
-                    .font(.system(size: 19, weight: .semibold))
+        let label = Image(systemName: systemImage)
+            .font(.system(size: 19, weight: .semibold))
+            .frame(maxWidth: .infinity)
+            .frame(height: 44)
+            .overlay(alignment: .topTrailing) {
+                if bluetooth {
+                    BluetoothRune()
+                        .stroke(Theme.accent, style: StrokeStyle(lineWidth: 1.4, lineCap: .round, lineJoin: .round))
+                        .frame(width: 6, height: 10)
+                        .padding(.top, 7)
+                        .padding(.trailing, 8)
+                }
             }
-        }
-        .frame(maxWidth: .infinity)
-        .frame(height: 44)
-        .overlay(alignment: .topTrailing) {
-            if bluetooth && !loading {
-                BluetoothRune()
-                    .stroke(Theme.accent, style: StrokeStyle(lineWidth: 1.4, lineCap: .round, lineJoin: .round))
-                    .frame(width: 6, height: 10)
-                    .padding(.top, 7)
-                    .padding(.trailing, 8)
-            }
-        }
         return Group {
             if bluetooth {
                 Button(intent: CarBluetoothCommandIntent(command)) { label }
@@ -206,8 +185,8 @@ struct CarWidgetView: View {
                 Button(intent: CarCommandIntent(command)) { label }
             }
         }
-        .buttonStyle(WidgetKeyStyle(active: active || loading, dimmed: othersBusy))
-        .accessibilityLabel(loading ? "Sending" : title)
+        .buttonStyle(WidgetKeyStyle(active: active))
+        .accessibilityLabel(title)
         .accessibilityHint(bluetooth ? "Opens the app and sends over Bluetooth" : "")
     }
 }
@@ -215,7 +194,6 @@ struct CarWidgetView: View {
 /// Flat version of the app's raised key: widgets can't draw shadows outside their tiles.
 private struct WidgetKeyStyle: ButtonStyle {
     var active: Bool
-    var dimmed = false
 
     func makeBody(configuration: Configuration) -> some View {
         let shape = RoundedRectangle(cornerRadius: 14, style: .continuous)
@@ -223,7 +201,7 @@ private struct WidgetKeyStyle: ButtonStyle {
             .foregroundStyle(active ? Theme.accent : Theme.text)
             .background(shape.fill(active ? Theme.accent.opacity(0.15) : Theme.raised))
             .overlay(shape.strokeBorder(active ? Theme.accent : Theme.raisedBorder, lineWidth: 1))
-            .opacity(dimmed ? 0.4 : (configuration.isPressed ? 0.6 : 1))
+            .opacity(configuration.isPressed ? 0.6 : 1)
     }
 }
 
@@ -240,5 +218,5 @@ private struct WidgetKeyStyle: ButtonStyle {
         return s
     }())
     CarEntry(date: .now, status: .sample, offline: true)
-    CarEntry(date: .now, status: .sample, pending: .unlock)
+    CarEntry(date: .now, status: .sample)
 }

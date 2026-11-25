@@ -19,10 +19,12 @@ struct CarCommandIntent: AppIntent {
 
     func perform() async throws -> some IntentResult {
         guard let command = CarCommand(rawValue: command) else { return .result() }
-        // WidgetKit only redraws once perform() returns, so return at once with the
-        // key marked as sending; the command carries on in the extension (InflightCommand)
-        // and reloads the widget again when it is done.
-        InflightCommand.start(command)
+        // iOS keeps the extension awake only while perform() runs, so wait here until the
+        // server has the command; it then sends it to the car whatever happens to us.
+        // WidgetKit redraws once this returns, showing the state the command should give.
+        if (try? await CarAPI().dispatch(command)) != nil {
+            RecentCommands.record(command)
+        }
         return .result()
     }
 }
